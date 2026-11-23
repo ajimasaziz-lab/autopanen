@@ -9,7 +9,7 @@
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
-    - Kalibrasi Drag (tab Peti) sekarang 4 langkah:
+    - Kalibrasi Drag (tab Peti) sekarang 2 langkah:
         1) klik slot item pertama, 2) klik area peti (tujuan drop),
         3) (opsional) klik slot item ke-2, 4) klik POSISI tombol Confirm.
       Setelah tiap seretan item, skrip mengklik posisi Confirm yang sudah dikalibrasi
@@ -81,7 +81,7 @@ local config = {
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
-    chestDist       = 4,
+    chestDist       = 2,
     usePathfind     = 1,       -- 1 = hitung rute dulu (Pathfinding) sebelum menuju peti
     stuckLimit      = 3,       -- detik tanpa gerak sebelum dianggap tersangkut (menuju peti)
     materialKeywords = "",
