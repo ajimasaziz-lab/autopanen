@@ -103,6 +103,9 @@ local markerLocked = false   -- true = posisi tombol bulat dikunci
 local storeNow = false         -- true = simpan ke peti sekarang juga (tombol Simpan Sekarang)
 local nextStoreAt = 0        -- waktu (os.clock) simpan otomatis berikutnya
 local chestFullFlag = false  -- true setelah notifikasi peti penuh terdeteksi
+local minimized = false        -- window sedang diminimize
+local setMinimized = nil       -- diisi di bagian MINIMIZE & CLOSE
+local calibWasMin = false      -- status minimize sebelum kalibrasi dimulai
 local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
 
 ------------------------------------------------------------------
@@ -200,6 +203,45 @@ local main = new("Frame", {
 }, gui)
 corner(main, 12)
 new("UIStroke", { Color = Color3.fromRGB(60, 66, 86), Thickness = 1.5 }, main)
+
+-- banner perintah kalibrasi: tampil di bawah window saat window diminimize otomatis
+local BANNER_H = 62
+local calibBanner = new("Frame", {
+    Name = "CalibBanner",
+    Size = UDim2.new(0, WIN_W, 0, BANNER_H),
+    BackgroundColor3 = COLORS.bar,
+    BorderSizePixel = 0,
+    Visible = false,
+    ZIndex = 20,
+}, gui)
+corner(calibBanner, 10)
+new("UIStroke", { Color = COLORS.orange, Thickness = 1.5 }, calibBanner)
+local calibText = makeLabel(calibBanner, "", UDim2.new(0, 8, 0, 4), UDim2.new(1, -16, 0, 34),
+    Enum.TextXAlignment.Left, COLORS.text, 12)
+calibText.TextWrapped = true
+calibText.TextYAlignment = Enum.TextYAlignment.Top
+calibText.ZIndex = 21
+local btnBannerCancel = makeButton(calibBanner, "✕ Batal", COLORS.red,
+    UDim2.new(0, 8, 0, 38), UDim2.new(0.5, -12, 0, 20))
+local btnBannerSkip = makeButton(calibBanner, "⏭ Lewati slot ke-2", COLORS.orange,
+    UDim2.new(0.5, 4, 0, 38), UDim2.new(0.5, -12, 0, 20))
+btnBannerCancel.TextSize = 11
+btnBannerSkip.TextSize = 11
+btnBannerCancel.ZIndex = 21
+btnBannerSkip.ZIndex = 21
+btnBannerSkip.Visible = false
+
+local function placeBanner()
+    local p, s = main.AbsolutePosition, main.AbsoluteSize
+    local cam = workspace.CurrentCamera
+    local vpH = cam and cam.ViewportSize.Y or 700
+    local y = p.Y + s.Y + 4
+    if y + BANNER_H > vpH then y = math.max(0, p.Y - BANNER_H - 4) end -- tidak muat di bawah -> di atas
+    calibBanner.Position = UDim2.fromOffset(p.X, y)
+end
+main:GetPropertyChangedSignal("AbsolutePosition"):Connect(placeBanner)
+main:GetPropertyChangedSignal("AbsoluteSize"):Connect(placeBanner)
+placeBanner()
 
 local titleBar = new("Frame", {
     Name = "TitleBar",
@@ -455,7 +497,10 @@ end
 ------------------------------------------------------------------
 -- UTILITAS UMUM
 ------------------------------------------------------------------
-local function setStatus(t) statusLabel.Text = "Status: " .. t end
+local function setStatus(t)
+    statusLabel.Text = "Status: " .. t
+    if calibStep > 0 then calibText.Text = t end -- perintah kalibrasi juga tampil di banner
+end
 
 local function getChar()
     local char = player.Character
@@ -915,6 +960,8 @@ end)
 -- KALIBRASI DRAG
 ------------------------------------------------------------------
 local function updateCalibLabel()
+    calibBanner.Visible = calibStep > 0
+    btnBannerSkip.Visible = (calibStep == 3)
     if calib.slot and calib.drop then
         calibLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
         calibLabel.Text = string.format("Kalibrasi OK | slot2: %s",
@@ -926,8 +973,12 @@ local function updateCalibLabel()
 end
 
 local function insideMain(pos)
-    local p, s = main.AbsolutePosition, main.AbsoluteSize
-    return pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+    local function inside(f)
+        if not f.Visible then return false end
+        local p, s = f.AbsolutePosition, f.AbsoluteSize
+        return pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+    end
+    return inside(main) or inside(calibBanner) -- klik di panel/banner script diabaikan
 end
 
 local function inputPos(input)
@@ -942,8 +993,19 @@ local function finishCalib(msg)
     btnCalib.Text = "🎯 Kalibrasi Drag"
     btnCalib.BackgroundColor3 = COLORS.blue
     updateCalibLabel()
+    if setMinimized and not calibWasMin then setMinimized(false) end -- munculkan window kembali
     setStatus(msg)
 end
+
+btnBannerCancel.MouseButton1Click:Connect(function()
+    if calibStep > 0 then finishCalib("Kalibrasi dibatalkan") end
+end)
+btnBannerSkip.MouseButton1Click:Connect(function()
+    if calibStep == 3 then
+        calib.step = nil
+        finishCalib("Kalibrasi selesai (1 slot)")
+    end
+end)
 
 btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
@@ -959,6 +1021,8 @@ btnCalib.MouseButton1Click:Connect(function()
     calib = { slot = nil, step = nil, drop = nil }
     calibStep = 1
     btnCalib.Text = "⏹ Batalkan kalibrasi"
+    calibWasMin = minimized
+    if setMinimized then setMinimized(true) end -- minimize otomatis, perintah tampil di banner
     btnCalib.BackgroundColor3 = COLORS.orange
     updateCalibLabel()
     setStatus("1/3 Buka peti (F), klik SLOT ITEM pertama di inventory")
@@ -1923,9 +1987,8 @@ end)
 ------------------------------------------------------------------
 -- MINIMIZE & CLOSE
 ------------------------------------------------------------------
-local minimized = false
-btnMin.MouseButton1Click:Connect(function()
-    minimized = not minimized
+setMinimized = function(state)
+    minimized = state
     btnMin.Text = minimized and "+" or "–"
     if minimized then
         content.Visible = false
@@ -1938,7 +2001,8 @@ btnMin.MouseButton1Click:Connect(function()
             if not minimized then content.Visible = true end
         end)
     end
-end)
+end
+btnMin.MouseButton1Click:Connect(function() setMinimized(not minimized) end)
 
 btnClose.MouseButton1Click:Connect(function()
     running = false
