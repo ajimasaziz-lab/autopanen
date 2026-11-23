@@ -1,6 +1,6 @@
 --[[
     🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
-    - Titik [E]    : player berjalan ke titik, menekan E 1x, lalu lanjut
+    - Titik [E]    : player berjalan (tombol WASD) ke titik, menekan E 1x, lanjut
     - Titik [Jalan]: player hanya melewati titik
     - Penghitung panen / loop / waktu (tetap tampil saat minimize)
     - Tas penuh -> jalan ke Trunk, tekan F (buka peti), seret item dari
@@ -9,7 +9,7 @@
       * lanjut ke peti berikutnya sesuai nomor
     - Tombol Reset Panen dan Reset Peti
     - Perlu KALIBRASI DRAG sekali (tab Peti)
-    - Window kecil + bisa di-scroll
+    - Jalan memakai WASD, scan peti memakai bounding box
 ]]
 
 local Players      = game:GetService("Players")
@@ -53,12 +53,13 @@ local config = {
     eDelay          = 1,
     radius          = 3,
     stepTimeout     = 15,
+    useWASD         = 1,       -- 1 = jalan pakai tombol WASD, 0 = pakai Humanoid:MoveTo
     -- peti
     autoStore       = true,
     bagCapacity     = 20,      -- tas penuh jika jumlah item >= angka ini
     chestKeywords   = "trunk", -- nama peti di game
     exactMatch      = 0,       -- 1 = nama harus persis sama (hindari batang pohon)
-    chestScanRadius = 150,
+    chestScanRadius = 50,      -- radius scan peti (stud)
     chestDist       = 4,       -- jarak berdiri dari peti (stud)
     materialKeywords = "",     -- kosong = semua item (kecuali yang dikecualikan)
     keepKeywords    = "",      -- item yang TIDAK boleh disimpan
@@ -156,7 +157,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 -- tinggi isi tiap halaman (yang di-scroll)
-local ROUTE_CANVAS = 372
+local ROUTE_CANVAS = 404
 local CHEST_CANVAS = 436
 
 local gui = new("ScreenGui", {
@@ -345,6 +346,7 @@ addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 248, "num")
 addSetting(pageRoute, "Delay setelah tekan E (detik)", "eDelay", 276, "num")
 addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
 addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
+addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -578,10 +580,41 @@ local function getPart(inst)
     end
 end
 
+-- kotak batas objek (lebih akurat daripada pivot, yang bisa jauh dari bentuk asli)
+local function boundsOf(inst)
+    if inst:IsA("Model") then
+        local ok, cf, size = pcall(function() return inst:GetBoundingBox() end)
+        if ok and cf and size then return cf, size end
+    elseif inst:IsA("BasePart") then
+        return inst.CFrame, inst.Size
+    end
+end
+
+-- jarak dari titik ke permukaan kotak batas
+local function distToBox(cf, size, pos)
+    local lp = cf:PointToObjectSpace(pos)
+    local h = size / 2
+    local c = Vector3.new(
+        math.clamp(lp.X, -h.X, h.X),
+        math.clamp(lp.Y, -h.Y, h.Y),
+        math.clamp(lp.Z, -h.Z, h.Z))
+    return (lp - c).Magnitude
+end
+
 local function chestPos(chest)
-    local ok, cf = pcall(function() return chest.inst:GetPivot() end)
-    if ok and cf then return cf.Position end
+    local cf = boundsOf(chest.inst)
+    if cf then return cf.Position end
     return chest.part.Position
+end
+
+-- jarak berdiri dari pusat peti (disesuaikan ukuran peti agar bisa dicapai)
+local function chestStandDist(chest)
+    local _, size = boundsOf(chest.inst)
+    local d = math.max(2, config.chestDist)
+    if size then
+        d = math.max(d, math.max(size.X, size.Z) / 2 + 2)
+    end
+    return d
 end
 
 local function chestValid(chest)
@@ -656,12 +689,14 @@ local function refreshChestList()
     end
 end
 
+-- Mengembalikan: jumlah peti baru, tabel info (outside, nearestOutside, unloaded)
 local function scanChests()
+    local info = { outside = 0, nearestOutside = nil, unloaded = 0 }
     local _, _, root = getChar()
-    if not root then setStatus("Karakter tidak ditemukan"); return 0 end
+    if not root then setStatus("Karakter tidak ditemukan"); return 0, info end
 
     local kws = parseKeywords(config.chestKeywords)
-    if #kws == 0 then setStatus("Isi nama peti dulu"); return 0 end
+    if #kws == 0 then setStatus("Isi nama peti dulu"); return 0, info end
 
     for i = #chests, 1, -1 do
         if not chestValid(chests[i]) then
@@ -672,25 +707,69 @@ local function scanChests()
     local known = {}
     for _, c in ipairs(chests) do known[c.inst] = true end
 
-    local matched, found = {}, {}
+    -- 1) kumpulkan semua objek yang namanya cocok
+    local all = {}
     for _, inst in ipairs(workspace:GetDescendants()) do
         if (inst:IsA("Model") or inst:IsA("BasePart"))
             and chestNameMatches(inst.Name, kws) and not isInsideCharacter(inst) then
-            local skip = false
-            local p = inst.Parent
-            while p and p ~= workspace do
-                if matched[p] then skip = true break end
-                p = p.Parent
+            table.insert(all, inst)
+        end
+    end
+
+    -- 2) Model yang di dalamnya ada Model cocok lain dianggap grup, dilewati
+    local keep, keepSet = {}, {}
+    for _, m in ipairs(all) do
+        local isGroup = false
+        if m:IsA("Model") then
+            for _, o in ipairs(all) do
+                if o ~= m and o:IsA("Model") and o:IsDescendantOf(m) then
+                    isGroup = true
+                    break
+                end
             end
-            if not skip then
-                matched[inst] = true
-                if not known[inst] then
-                    local part = getPart(inst)
-                    if part then
-                        local d = (inst:GetPivot().Position - root.Position).Magnitude
-                        if d <= config.chestScanRadius then
-                            table.insert(found, { inst = inst, part = part, dist = d })
-                        end
+        end
+        if not isGroup then
+            table.insert(keep, m)
+            keepSet[m] = true
+        end
+    end
+
+    -- 3) buang yang berada di dalam objek lain yang sudah dipilih
+    local final = {}
+    for _, m in ipairs(keep) do
+        local nested = false
+        local p = m.Parent
+        while p and p ~= workspace do
+            if keepSet[p] then nested = true break end
+            p = p.Parent
+        end
+        if not nested then table.insert(final, m) end
+    end
+
+    -- 4) saring berdasarkan jarak ke kotak batas
+    local found = {}
+    print(string.format("[AutoPanen] Scan: %d kandidat nama cocok, radius %s stud", #final, tostring(config.chestScanRadius)))
+    for _, inst in ipairs(final) do
+        if not known[inst] then
+            local part = getPart(inst)
+            if not part then
+                info.unloaded += 1
+                print("[AutoPanen]  - " .. inst:GetFullName() .. " | belum ter-load (tidak ada part)")
+            else
+                local cf, size = boundsOf(inst)
+                local d
+                if cf then
+                    d = distToBox(cf, size, root.Position)
+                else
+                    d = (part.Position - root.Position).Magnitude
+                end
+                print(string.format("[AutoPanen]  - %s | jarak %.1f stud", inst:GetFullName(), d))
+                if d <= config.chestScanRadius then
+                    table.insert(found, { inst = inst, part = part, dist = d })
+                else
+                    info.outside += 1
+                    if not info.nearestOutside or d < info.nearestOutside then
+                        info.nearestOutside = d
                     end
                 end
             end
@@ -708,7 +787,7 @@ local function scanChests()
 
     refreshChestList()
     updateChestInfo()
-    return #found
+    return #found, info
 end
 
 local function resetChests()
@@ -721,13 +800,20 @@ local function resetChests()
 end
 
 btnScan.MouseButton1Click:Connect(function()
-    local n = scanChests()
+    local n, info = scanChests()
+    local extra = ""
+    if info.outside > 0 then
+        extra = extra .. string.format(" | luar radius: %d (terdekat %.0f)", info.outside, info.nearestOutside or 0)
+    end
+    if info.unloaded > 0 then
+        extra = extra .. string.format(" | belum ter-load: %d", info.unloaded)
+    end
     if n > 0 then
-        setStatus(string.format("%d peti baru ditandai (total %d)", n, #chests))
+        setStatus(string.format("%d peti baru (total %d)%s", n, #chests, extra))
     elseif #chests == 0 then
-        setStatus("Tidak ada Trunk ditemukan, cek nama/radius")
+        setStatus("Tidak ada Trunk ditemukan" .. extra)
     else
-        setStatus("Tidak ada peti baru")
+        setStatus("Tidak ada peti baru" .. extra)
     end
 end)
 
@@ -780,7 +866,6 @@ end
 btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
     if calibStep > 0 then
-        -- tombol ditekan lagi: batalkan / lewati langkah 3
         if calibStep == 3 then
             calib.step = nil
             finishCalib("Kalibrasi selesai (1 slot)")
@@ -893,8 +978,23 @@ local function countMaterials(skipTool)
 end
 
 ------------------------------------------------------------------
--- GERAK & INPUT
+-- GERAK (WASD) & INPUT
 ------------------------------------------------------------------
+local KC = Enum.KeyCode
+local heldKeys = {}
+
+local function setKey(kc, down)
+    if (heldKeys[kc] == true) == down then return end
+    heldKeys[kc] = down or nil
+    pcall(function() VIM:SendKeyEvent(down, kc, false, game) end)
+end
+
+local function releaseMoveKeys()
+    for _, kc in ipairs({ KC.W, KC.A, KC.S, KC.D, KC.Space }) do
+        if heldKeys[kc] then setKey(kc, false) end
+    end
+end
+
 local function pressKey(keyCode, hold)
     pcall(function()
         VIM:SendKeyEvent(true, keyCode, false, game)
@@ -903,12 +1003,38 @@ local function pressKey(keyCode, hold)
     end)
 end
 
-local function pressE() pressKey(Enum.KeyCode.E, 0.05) end
+local function pressE() pressKey(KC.E, 0.05) end
 
 local function openKeyCode()
     local k = tostring(config.openKey or "F"):upper()
-    local ok, kc = pcall(function() return Enum.KeyCode[k] end)
-    return (ok and kc) or Enum.KeyCode.F
+    local ok, kc = pcall(function() return KC[k] end)
+    return (ok and kc) or KC.F
+end
+
+-- arahkan karakter ke target dengan menekan W/A/S/D relatif terhadap kamera
+local function steerTo(root, target)
+    local cam = workspace.CurrentCamera
+    local dir = Vector3.new(target.X - root.Position.X, 0, target.Z - root.Position.Z)
+    if dir.Magnitude < 0.05 or not cam then
+        releaseMoveKeys()
+        return
+    end
+    dir = dir.Unit
+
+    local look = cam.CFrame.LookVector
+    look = Vector3.new(look.X, 0, look.Z)
+    local right = cam.CFrame.RightVector
+    right = Vector3.new(right.X, 0, right.Z)
+    if look.Magnitude < 0.05 then look = Vector3.new(0, 0, -1) else look = look.Unit end
+    if right.Magnitude < 0.05 then right = Vector3.new(1, 0, 0) else right = right.Unit end
+
+    local f = dir:Dot(look)
+    local r = dir:Dot(right)
+
+    setKey(KC.W, f > 0.3)
+    setKey(KC.S, f < -0.3)
+    setKey(KC.D, r > 0.3)
+    setKey(KC.A, r < -0.3)
 end
 
 -- seret dari posisi layar A ke B
@@ -933,31 +1059,50 @@ local function walkTo(target, myId, radius)
     radius = radius or config.radius
     local start = os.clock()
     local lastPos, lastCheck = nil, os.clock()
+    local jumpRelease = nil
+    local result = false
 
     while alive(myId) do
         local _, hum, root = getChar()
-        if not root then return false end
+        if not root then break end
 
         local flat = Vector3.new(root.Position.X - target.X, 0, root.Position.Z - target.Z).Magnitude
-        if flat <= radius and math.abs(root.Position.Y - target.Y) < 8 then
-            return true
+        if flat <= radius and math.abs(root.Position.Y - target.Y) < 12 then
+            result = true
+            break
         end
         if os.clock() - start > config.stepTimeout then
-            return false
+            break
         end
 
-        hum:MoveTo(target)
+        if config.useWASD == 1 then
+            steerTo(root, target)
+        else
+            hum:MoveTo(target)
+        end
 
+        -- deteksi nyangkut -> lompat
         if os.clock() - lastCheck >= 1 then
             if lastPos and (root.Position - lastPos).Magnitude < 0.6 then
-                hum.Jump = true
+                if config.useWASD == 1 then
+                    setKey(KC.Space, true)
+                    jumpRelease = os.clock() + 0.2
+                else
+                    hum.Jump = true
+                end
             end
             lastPos = root.Position
             lastCheck = os.clock()
         end
-        task.wait(0.1)
+        if jumpRelease and os.clock() >= jumpRelease then
+            setKey(KC.Space, false)
+            jumpRelease = nil
+        end
+        task.wait(0.05)
     end
-    return false
+
+    releaseMoveKeys()
+    return result
 end
 
 local function waitInterruptible(seconds, myId)
@@ -994,11 +1139,9 @@ local function depositAll(myId)
         return "nocalib"
     end
 
-    if #chests == 0 then
-        setStatus("Mencari Trunk terdekat...")
-        scanChests()
-        if #chests == 0 then return "nochest" end
-    end
+    setStatus("Mencari Trunk terdekat...")
+    scanChests() -- tambahkan Trunk baru yang masuk radius
+    if #chests == 0 then return "nochest" end
 
     local returnPos = root.Position
     local skipTool = char:FindFirstChildOfClass("Tool")
@@ -1013,8 +1156,7 @@ local function depositAll(myId)
 
         -- menuju peti & buka dengan F
         setStatus(string.format("Menuju peti #%d", chest.number))
-        local standDist = math.max(2, config.chestDist)
-        walkTo(chestPos(chest), myId, standDist)
+        walkTo(chestPos(chest), myId, chestStandDist(chest))
         if not alive(myId) then break end
 
         setStatus(string.format("Membuka peti #%d (%s)", chest.number, config.openKey))
@@ -1088,6 +1230,7 @@ local function stopRun(msg)
     stats.runStart = nil
     running = false
     runId += 1
+    releaseMoveKeys()
     local _, hum, root = getChar()
     if hum and root then hum:MoveTo(root.Position) end
     highlight(nil)
@@ -1186,6 +1329,7 @@ btnClose.MouseButton1Click:Connect(function()
     running = false
     runId += 1
     calibStep = 0
+    releaseMoveKeys()
     for _, c in ipairs(chests) do removeMarker(c) end
     gui:Destroy()
 end)
