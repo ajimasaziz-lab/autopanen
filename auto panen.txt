@@ -9,6 +9,7 @@
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
+    - Setelah tiap seretan item, tombol pop up "Confirm" diklik otomatis sebelum lanjut item berikutnya
     - Waktu simpan tiba -> HITUNG RUTE dulu (Pathfinding, 8 titik berdiri di sekeliling peti,
       pilih yang valid & terpendek), baru jalan ke peti. Jika tersangkut di tengah jalan, karakter
       kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
@@ -61,6 +62,8 @@ local config = {
     harvestKey      = "F",     -- tombol panen (mode 1)
     harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
     chestFullNotif  = "chest full, trunk full, storage full",                    -- notifikasi peti penuh
+    confirmText     = "confirm", -- teks tombol pop up konfirmasi setelah item digeser (kosong = nonaktif)
+    confirmWait     = 1.5,     -- maksimal menunggu pop up konfirmasi muncul (detik)
     dragTotal       = 20,      -- jumlah seretan per kunjungan jika isi tas tidak bisa dihitung
     countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
@@ -184,7 +187,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 local ROUTE_CANVAS = 644
-local CHEST_CANVAS = 632
+local CHEST_CANVAS = 688
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -467,6 +470,8 @@ addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 516, "num")
 addSetting(pageChest, "Notifikasi peti penuh (kata)", "chestFullNotif", 544, "text", 80, "chest full")
 addSetting(pageChest, "Jumlah seret (tanpa hitungan)", "dragTotal", 572, "int", 50)
 addSetting(pageChest, "Hitung rute dulu (1=ya)",      "usePathfind", 600, "int", 50)
+addSetting(pageChest, "Teks tombol Confirm",          "confirmText", 628, "text", 80, "confirm")
+addSetting(pageChest, "Tunggu pop up Confirm (detik)", "confirmWait", 656, "num", 50)
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -1613,6 +1618,92 @@ local function smartTravel(goals, finalTarget, myId, radius, fromIdx)
 end
 
 ------------------------------------------------------------------
+-- KLIK TOMBOL "Confirm" (pop up setelah item digeser ke peti)
+------------------------------------------------------------------
+local function confirmShown(g)
+    if not g.Visible then return false end
+    if g:IsA("TextLabel") or g:IsA("TextButton") then
+        if g.TextTransparency >= 0.9 then return false end
+    end
+    if g.AbsoluteSize.X < 2 or g.AbsoluteSize.Y < 2 then return false end
+    local p = g.Parent
+    while p do
+        if p:IsA("GuiObject") and not p.Visible then return false end
+        if p:IsA("ScreenGui") then return p.Enabled end
+        p = p.Parent
+    end
+    return true
+end
+
+-- cari tombol Confirm yang sedang tampil di layar game. return: GuiObject yang diklik
+local function findConfirmButton()
+    local kw = tostring(config.confirmText or ""):lower():match("^%s*(.-)%s*$")
+    if kw == "" then return nil end
+    local pg = player:FindFirstChildOfClass("PlayerGui")
+    if not pg then return nil end
+
+    local exact, loose
+    for _, d in ipairs(pg:GetDescendants()) do
+        if (d:IsA("TextButton") or d:IsA("TextLabel")) and not d:IsDescendantOf(gui)
+            and d.Text ~= "" and #d.Text <= 40 and confirmShown(d) then
+            local txt = d.Text:gsub("<[^>]+>", ""):lower():match("^%s*(.-)%s*$")
+            if txt == kw then
+                -- label bertuliskan Confirm: yang diklik adalah tombol pembungkusnya (jika ada)
+                local target = d
+                if not d:IsA("GuiButton") then
+                    local b = d:FindFirstAncestorWhichIsA("GuiButton")
+                    if b then target = b end
+                end
+                exact = exact or target
+            elseif d:IsA("TextButton") and txt:find(kw, 1, true) then
+                loose = loose or d
+            end
+        end
+    end
+    return exact or loose
+end
+
+local function guiCenter(g)
+    local pos = g.AbsolutePosition + g.AbsoluteSize / 2
+    local sg = g:FindFirstAncestorOfClass("ScreenGui")
+    if sg and not sg.IgnoreGuiInset then
+        pos += GuiService:GetGuiInset() -- koordinat mouse memasukkan tinggi top bar
+    end
+    return pos
+end
+
+-- tunggu pop up Confirm muncul lalu klik. return true jika berhasil diklik
+local function clickConfirm(myId)
+    if tostring(config.confirmText or "") == "" then return false end
+    local deadline = os.clock() + math.max(0.2, config.confirmWait)
+    while alive(myId) and os.clock() < deadline do
+        local btn = findConfirmButton()
+        if btn then
+            setStatus("Klik Confirm...")
+            task.wait(0.15) -- beri waktu animasi pop up selesai
+            btn = findConfirmButton() or btn
+            local pos = guiCenter(btn)
+
+            -- sembunyikan sesaat panel/tombol bulat script jika menutupi tombol Confirm
+            local mainWas = main.Visible
+            local hideMain = insideMain(pos)
+            local hideMarker = markerFrame and markerFrame.Visible and
+                (Vector2.new(markerFrame.Position.X.Offset, markerFrame.Position.Y.Offset) - pos).Magnitude < 30
+            if hideMain then main.Visible = false end
+            if hideMarker then markerFrame.Visible = false end
+            task.wait(0.05)
+            clickAt(pos)
+            task.wait(0.1)
+            if hideMain then main.Visible = mainWas end
+            if hideMarker then markerFrame.Visible = markerShown end
+            return true
+        end
+        task.wait(0.1)
+    end
+    return false
+end
+
+------------------------------------------------------------------
 -- SIMPAN KE PETI
 ------------------------------------------------------------------
 local function pickChest(skip)
@@ -1683,6 +1774,7 @@ local function depositAll(myId)
                 local sidx = (calib.step and config.slotCount > 1) and ((k - 1) % config.slotCount + 1) or 1
                 setStatus(string.format("Pindah item ke peti #%d (%d/%d)", chest.number, k, total))
                 dragMouse(slotPos(sidx), calib.drop)
+                clickConfirm(myId)
                 waitInterruptible(config.depositDelay, myId)
                 deposited += 1
                 if chestFullFlag then
@@ -1709,6 +1801,7 @@ local function depositAll(myId)
 
             setStatus(string.format("Pindah item ke peti #%d (slot %d)", chest.number, idx))
             dragMouse(slotPos(idx), calib.drop)
+            clickConfirm(myId)
             waitInterruptible(config.depositDelay, myId)
             local after = countMaterials(skipTool)
 
