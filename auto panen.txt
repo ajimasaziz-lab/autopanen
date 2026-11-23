@@ -4,11 +4,12 @@
                     (mode 2 = klik lewat TOMBOL BULAT melayang yang digeser ke tombol
                     panen di layar, lalu dikunci; mode 1 = tekan tombol F), lanjut
     - Titik Jalan : player hanya melewati titik
+    - Auto simpan berjalan berkala: tiap N menit (pengaturan "Simpan otomatis tiap", tab Peti)
     - Penghitung panen membaca teks notifikasi di layar ("Harvested ... xN"), bukan jumlah tombol ditekan
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
-    - Tas penuh -> jalan ke peti. Jika tersangkut di tengah jalan, karakter
+    - Waktu simpan tiba -> jalan ke peti. Jika tersangkut di tengah jalan, karakter
       kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
       lalu mencoba mendekati peti lagi dari titik rute tersebut.
     - Scan peti: nama default "trunk, chest" (otomatis kena "Mimic Chest").
@@ -57,6 +58,8 @@ local config = {
     harvestMode     = 2,       -- 1 = tekan tombol F, 2 = klik lewat tombol bulat melayang
     harvestKey      = "F",     -- tombol panen (mode 1)
     harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
+    chestFullNotif  = "chest full, trunk full, storage full",                    -- notifikasi peti penuh
+    dragTotal       = 20,      -- jumlah seretan per kunjungan jika isi tas tidak bisa dihitung
     countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
     stepTimeout     = 15,
@@ -65,7 +68,7 @@ local config = {
     lookahead       = 5,       -- titik bidik di depan pada garis rute (stud)
     -- peti
     autoStore       = true,
-    bagCapacity     = 20,
+    storeInterval   = 5,       -- simpan otomatis tiap berapa menit (0 = nonaktif)
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
@@ -94,6 +97,8 @@ local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
 local harvestPos = nil       -- Vector2 posisi tengah tombol bulat (koordinat layar)
 local markerFrame = nil      -- tombol bulat melayang
 local markerLocked = false   -- true = posisi tombol bulat dikunci
+local nextStoreAt = 0        -- waktu (os.clock) simpan otomatis berikutnya
+local chestFullFlag = false  -- true setelah notifikasi peti penuh terdeteksi
 local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
 
 ------------------------------------------------------------------
@@ -172,7 +177,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 local ROUTE_CANVAS = 644
-local CHEST_CANVAS = 516
+local CHEST_CANVAS = 572
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -403,13 +408,15 @@ btnInspect.TextSize = 11
 addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 232, "text", 110, "trunk, chest")
 addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 260, "int", 50)
 addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 288, "num")
-addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 316, "int")
+addSetting(pageChest, "Simpan otomatis tiap (menit)", "storeInterval", 316, "num")
 addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 344, "text", 80, "semua")
 addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 372, "text", 80, "contoh: sabit")
 addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 400, "num")
 addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 428, "num")
 addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 456, "int")
 addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 484, "num")
+addSetting(pageChest, "Notifikasi peti penuh (kata)", "chestFullNotif", 512, "text", 80, "chest full")
+addSetting(pageChest, "Jumlah seret (tanpa hitungan)", "dragTotal", 540, "int", 50)
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -1100,16 +1107,6 @@ local function allTools()
     return list
 end
 
-local function bagIsFull()
-    if CUSTOM_BAG_FULL then
-        local ok, res = pcall(CUSTOM_BAG_FULL)
-        return ok and res == true
-    end
-    local total = 0
-    for _, t in ipairs(allTools()) do total += countTool(t) end
-    return total >= config.bagCapacity
-end
-
 local function collectMaterials(skipTool)
     local matKw  = parseKeywords(config.materialKeywords)
     local keepKw = parseKeywords(config.keepKeywords)
@@ -1481,9 +1478,11 @@ local function depositAll(myId)
     local result = "ok"
     local deposited = 0
     local skip = {}
+    -- jika inventory game bukan Tool, isi tas tidak bisa dihitung -> mode seret buta
+    local countable = countMaterials(skipTool) > 0
 
     while alive(myId) do
-        if countMaterials(skipTool) <= 0 then break end
+        if countable and countMaterials(skipTool) <= 0 then break end
 
         local chest = pickChest(skip)
         if not chest then
@@ -1503,6 +1502,34 @@ local function depositAll(myId)
         setStatus(string.format("Membuka peti #%d (%s)", chest.number, config.openKey))
         pressKey(openKeyCode(), 0.1)
         waitInterruptible(config.openDelay, myId)
+
+        if not countable then
+            -- mode buta: seret item sebanyak dragTotal kali, berhenti jika notifikasi peti penuh muncul
+            local total = math.max(1, config.dragTotal)
+            chestFullFlag = false
+            for k = 1, total do
+                if not alive(myId) then break end
+                local sidx = (calib.step and config.slotCount > 1) and ((k - 1) % config.slotCount + 1) or 1
+                setStatus(string.format("Pindah item ke peti #%d (%d/%d)", chest.number, k, total))
+                dragMouse(slotPos(sidx), calib.drop)
+                waitInterruptible(config.depositDelay, myId)
+                deposited += 1
+                if chestFullFlag then
+                    chest.full = true
+                    updateMarker(chest)
+                    updateChestInfo()
+                    refreshChestList()
+                    setStatus(string.format("Peti #%d penuh, pindah peti berikutnya", chest.number))
+                    break
+                end
+            end
+            if config.closeChest == 1 and alive(myId) then
+                pressKey(openKeyCode(), 0.1)
+                task.wait(0.3)
+            end
+            if chest.full then continue end -- lanjut peti berikutnya
+            break
+        end
 
         local idx, fails = 1, 0
         while alive(myId) and not chest.full do
@@ -1574,12 +1601,45 @@ local function parseHarvestAmount(text)
     return n or 1
 end
 
+local kwCache = {}
+local function kwOf(key)
+    local s = tostring(config[key] or "")
+    local c = kwCache[key]
+    if not c or c.s ~= s then
+        c = { s = s, list = parseKeywords(s) }
+        kwCache[key] = c
+    end
+    return c.list
+end
+
+-- label benar-benar tampil di layar (bukan template tersembunyi)
+local function isShown(l)
+    if not l.Visible or l.TextTransparency >= 0.9 then return false end
+    local p = l.Parent
+    while p do
+        if p:IsA("GuiObject") and not p.Visible then return false end
+        if p:IsA("ScreenGui") then return p.Enabled end
+        p = p.Parent
+    end
+    return true
+end
+
+-- deteksi notifikasi peti penuh
+local function scanFlags(label, text, allowChest)
+    if not isShown(label) then return end
+    if allowChest and nameMatches(text, kwOf("chestFullNotif")) then
+        chestFullFlag = true
+    end
+end
+
 local function checkNotif(label)
     if not running or not gui.Parent then return end
     if not label.Visible or label:IsDescendantOf(gui) then return end
     local raw = label.Text
     if raw == "" then return end
+    if #raw > 120 then return end
     local text = raw:gsub("<[^>]+>", "")                 -- buang tag rich text
+    scanFlags(label, text, true)
     local kw = tostring(config.harvestNotif or ""):lower()
     if kw == "" or not text:lower():find(kw, 1, true) then return end
 
@@ -1638,6 +1698,7 @@ local function startRun()
     runId += 1
     local myId = runId
     routeIdx = nil
+    nextStoreAt = os.clock() + math.max(0.1, config.storeInterval) * 60
     stats.runStart = os.clock()
     updateButtons()
 
@@ -1655,17 +1716,18 @@ local function startRun()
                 local pt = points[i]
                 if not alive(myId) then break end
 
-                if config.autoStore and os.clock() >= depositCooldown and bagIsFull() then
-                    setStatus("Tas penuh, menyimpan ke peti...")
+                if config.autoStore and config.storeInterval > 0 and os.clock() >= nextStoreAt then
+                    setStatus("Waktunya simpan otomatis, menuju peti...")
                     local res = depositAll(myId)
+                    nextStoreAt = os.clock() + config.storeInterval * 60
                     if res == "allfull" then
                         stopRun("Semua peti penuh, script berhenti")
                         return
                     elseif res == "nochest" then
-                        depositCooldown = os.clock() + 30
-                        setStatus("Tas penuh tapi tidak ada peti terdeteksi")
+                        setStatus("Waktunya simpan tapi tidak ada peti terdeteksi")
+                    elseif res == "nocalib" then
+                        setStatus("Waktunya simpan tapi Kalibrasi Drag belum diatur")
                     elseif res == "unreachable" then
-                        depositCooldown = os.clock() + 30
                         setStatus("Peti tidak terjangkau, lanjut panen")
                     end
                     if not alive(myId) then break end
