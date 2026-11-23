@@ -1,0 +1,1175 @@
+--[[
+    🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
+    - Titik [E]    : player berjalan ke titik, menekan E 1x, lalu lanjut
+    - Titik [Jalan]: player hanya melewati titik
+    - Penghitung panen / loop / waktu (tetap tampil saat minimize)
+    - Tas penuh -> jalan ke Trunk, tekan F (buka peti), seret item dari
+      inventory ke area peti (kiri)
+      * peti ditandai angka, peti penuh ditandai merah dan tidak diisi lagi
+      * lanjut ke peti berikutnya sesuai nomor
+    - Tombol Reset Panen dan Reset Peti
+    - Perlu KALIBRASI DRAG sekali (tab Peti)
+]]
+
+local Players      = game:GetService("Players")
+local UIS          = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local GuiService   = game:GetService("GuiService")
+local VIM          = game:GetService("VirtualInputManager")
+
+local player = Players.LocalPlayer
+
+------------------------------------------------------------------
+-- HOOK OPSIONAL
+------------------------------------------------------------------
+-- function() -> true jika tas penuh
+local CUSTOM_BAG_FULL = nil
+-- function() -> jumlah item material di tas (jika inventory game kamu bukan Tool)
+local CUSTOM_MATERIAL_COUNT = nil
+
+------------------------------------------------------------------
+-- PARENT GUI
+------------------------------------------------------------------
+local function getParent()
+    local ok, gui = pcall(function()
+        return (gethui and gethui()) or game:GetService("CoreGui")
+    end)
+    if ok and gui then return gui end
+    return player:WaitForChild("PlayerGui")
+end
+
+local parentGui = getParent()
+local old = parentGui:FindFirstChild("AutoPanenGUI")
+if old then old:Destroy() end
+
+------------------------------------------------------------------
+-- STATE
+------------------------------------------------------------------
+local config = {
+    -- rute
+    maxLoops        = 0,
+    loopDelay       = 2,
+    eDelay          = 1,
+    radius          = 3,
+    stepTimeout     = 15,
+    -- peti
+    autoStore       = true,
+    bagCapacity     = 20,      -- tas penuh jika jumlah item >= angka ini
+    chestKeywords   = "trunk", -- nama peti di game
+    exactMatch      = 0,       -- 1 = nama harus persis sama (hindari batang pohon)
+    chestScanRadius = 150,
+    chestDist       = 4,       -- jarak berdiri dari peti (stud)
+    materialKeywords = "",     -- kosong = semua item (kecuali yang dikecualikan)
+    keepKeywords    = "",      -- item yang TIDAK boleh disimpan
+    depositDelay    = 0.6,     -- jeda setelah tiap seretan (detik)
+    openKey         = "F",     -- tombol buka peti
+    openDelay       = 1,       -- tunggu UI peti terbuka (detik)
+    slotCount       = 1,       -- berapa slot yang dicoba jika slot pertama gagal
+    closeChest      = 0,       -- 1 = tekan F lagi untuk menutup peti setelah selesai
+}
+
+local points   = {}
+local chests   = {}   -- { inst, part, number, full, marker, label }
+local nextChestNo = 1
+local running  = false
+local runId    = 0
+local rowRefs  = {}
+local stats    = { harvested = 0, loops = 0, deposited = 0, elapsed = 0, runStart = nil }
+local depositCooldown = 0
+local calib    = { slot = nil, step = nil, drop = nil }  -- Vector2 posisi layar
+local calibStep = 0
+
+------------------------------------------------------------------
+-- HELPER UI
+------------------------------------------------------------------
+local COLORS = {
+    bg     = Color3.fromRGB(24, 26, 33),
+    bar    = Color3.fromRGB(34, 38, 50),
+    panel  = Color3.fromRGB(38, 42, 54),
+    text   = Color3.fromRGB(235, 238, 245),
+    sub    = Color3.fromRGB(150, 158, 175),
+    green  = Color3.fromRGB(46, 160, 90),
+    red    = Color3.fromRGB(205, 65, 65),
+    blue   = Color3.fromRGB(55, 120, 215),
+    orange = Color3.fromRGB(230, 150, 40),
+    grey   = Color3.fromRGB(70, 76, 94),
+    chest  = Color3.fromRGB(235, 175, 45),
+}
+
+local function new(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
+    return o
+end
+
+local function corner(parent, r)
+    return new("UICorner", { CornerRadius = UDim.new(0, r or 8) }, parent)
+end
+
+local function makeButton(parent, text, color, pos, size, anchor)
+    local b = new("TextButton", {
+        Text = text,
+        Font = Enum.Font.GothamBold,
+        TextSize = 13,
+        TextColor3 = COLORS.text,
+        BackgroundColor3 = color,
+        AutoButtonColor = true,
+        BorderSizePixel = 0,
+        Position = pos,
+        Size = size,
+        AnchorPoint = anchor or Vector2.new(0, 0),
+    }, parent)
+    corner(b, 6)
+    return b
+end
+
+local function makeLabel(parent, text, pos, size, align, color, textSize)
+    return new("TextLabel", {
+        Text = text,
+        Font = Enum.Font.Gotham,
+        TextSize = textSize or 13,
+        TextColor3 = color or COLORS.text,
+        TextXAlignment = align or Enum.TextXAlignment.Left,
+        BackgroundTransparency = 1,
+        Position = pos,
+        Size = size,
+    }, parent)
+end
+
+------------------------------------------------------------------
+-- WINDOW
+------------------------------------------------------------------
+local WIN_W   = 340
+local TITLE_H = 44
+local STRIP_H = 26
+local TAB_H   = 34
+local PAGE_H  = 440
+local FOOT_H  = 62
+local CONTENT_H = TAB_H + PAGE_H + FOOT_H
+local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
+local PAD     = 12
+local halfW   = (WIN_W - PAD * 3) / 2
+
+local gui = new("ScreenGui", {
+    Name = "AutoPanenGUI",
+    ResetOnSpawn = false,
+    IgnoreGuiInset = true, -- koordinat GUI sama dengan koordinat mouse
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, parentGui)
+
+local main = new("Frame", {
+    Name = "Main",
+    Size = UDim2.new(0, WIN_W, 0, EXP_H),
+    Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -EXP_H / 2),
+    BackgroundColor3 = COLORS.bg,
+    BorderSizePixel = 0,
+    ClipsDescendants = true,
+}, gui)
+corner(main, 12)
+new("UIStroke", { Color = Color3.fromRGB(60, 66, 86), Thickness = 1.5 }, main)
+
+local titleBar = new("Frame", {
+    Name = "TitleBar",
+    Size = UDim2.new(1, 0, 0, TITLE_H),
+    BackgroundColor3 = COLORS.bar,
+    BorderSizePixel = 0,
+}, main)
+corner(titleBar, 12)
+
+local titleLabel = makeLabel(titleBar, "🌾 Auto Panen",
+    UDim2.new(0, 12, 0, 0), UDim2.new(0, 120, 1, 0), Enum.TextXAlignment.Left, COLORS.text, 15)
+titleLabel.Font = Enum.Font.GothamBold
+
+local btnClose = makeButton(titleBar, "✕", COLORS.red,
+    UDim2.new(1, -8, 0.5, 0), UDim2.new(0, 26, 0, 26), Vector2.new(1, 0.5))
+local btnMin = makeButton(titleBar, "–", COLORS.grey,
+    UDim2.new(1, -40, 0.5, 0), UDim2.new(0, 26, 0, 26), Vector2.new(1, 0.5))
+local btnStop = makeButton(titleBar, "■ Stop", COLORS.red,
+    UDim2.new(1, -72, 0.5, 0), UDim2.new(0, 54, 0, 26), Vector2.new(1, 0.5))
+local btnStart = makeButton(titleBar, "▶ Start", COLORS.green,
+    UDim2.new(1, -132, 0.5, 0), UDim2.new(0, 54, 0, 26), Vector2.new(1, 0.5))
+btnStop.TextSize = 12
+btnStart.TextSize = 12
+
+local statsStrip = new("Frame", {
+    Name = "StatsStrip",
+    Position = UDim2.new(0, 0, 0, TITLE_H),
+    Size = UDim2.new(1, 0, 0, STRIP_H),
+    BackgroundColor3 = Color3.fromRGB(30, 33, 43),
+    BorderSizePixel = 0,
+}, main)
+
+local statsLabel = makeLabel(statsStrip, "🌱 Panen: 0   |   🔁 Loop: 0   |   ⏱ 00:00",
+    UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 1, 0), Enum.TextXAlignment.Center, Color3.fromRGB(150, 230, 170), 13)
+statsLabel.Font = Enum.Font.GothamBold
+
+local content = new("Frame", {
+    Name = "Content",
+    Position = UDim2.new(0, 0, 0, TITLE_H + STRIP_H),
+    Size = UDim2.new(1, 0, 0, CONTENT_H),
+    BackgroundTransparency = 1,
+}, main)
+
+local tabRoute = makeButton(content, "🗺 Rute", COLORS.blue,
+    UDim2.new(0, PAD, 0, 4), UDim2.new(0, halfW, 0, 26))
+local tabChest = makeButton(content, "📦 Peti", COLORS.grey,
+    UDim2.new(0, PAD * 2 + halfW, 0, 4), UDim2.new(0, halfW, 0, 26))
+
+local pageRoute = new("Frame", {
+    Position = UDim2.new(0, 0, 0, TAB_H),
+    Size = UDim2.new(1, 0, 0, PAGE_H),
+    BackgroundTransparency = 1,
+}, content)
+
+local pageChest = new("Frame", {
+    Position = UDim2.new(0, 0, 0, TAB_H),
+    Size = UDim2.new(1, 0, 0, PAGE_H),
+    BackgroundTransparency = 1,
+    Visible = false,
+}, content)
+
+local function showTab(name)
+    pageRoute.Visible = (name == "route")
+    pageChest.Visible = (name == "chest")
+    tabRoute.BackgroundColor3 = (name == "route") and COLORS.blue or COLORS.grey
+    tabChest.BackgroundColor3 = (name == "chest") and COLORS.blue or COLORS.grey
+end
+tabRoute.MouseButton1Click:Connect(function() showTab("route") end)
+tabChest.MouseButton1Click:Connect(function() showTab("chest") end)
+
+local footer = new("Frame", {
+    Position = UDim2.new(0, 0, 0, TAB_H + PAGE_H),
+    Size = UDim2.new(1, 0, 0, FOOT_H),
+    BackgroundTransparency = 1,
+}, content)
+
+local btnResetHarvest = makeButton(footer, "♻ Reset Panen", COLORS.orange,
+    UDim2.new(0, PAD, 0, 4), UDim2.new(0, halfW, 0, 28))
+local btnResetChest = makeButton(footer, "♻ Reset Peti", COLORS.orange,
+    UDim2.new(0, PAD * 2 + halfW, 0, 4), UDim2.new(0, halfW, 0, 28))
+
+local statusLabel = makeLabel(footer, "Status: Siap", UDim2.new(0, PAD, 0, 36),
+    UDim2.new(1, -PAD * 2, 0, 22), Enum.TextXAlignment.Left, COLORS.sub, 12)
+statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+
+local function addSetting(parent, labelText, key, y, kind, boxW, placeholder)
+    boxW = boxW or 70
+    makeLabel(parent, labelText, UDim2.new(0, PAD, 0, y),
+        UDim2.new(1, -PAD * 2 - boxW - 6, 0, 24), Enum.TextXAlignment.Left, COLORS.text, 12)
+    local box = new("TextBox", {
+        Text = tostring(config[key]),
+        PlaceholderText = placeholder or "",
+        PlaceholderColor3 = COLORS.sub,
+        Font = Enum.Font.GothamBold,
+        TextSize = 12,
+        TextColor3 = COLORS.text,
+        BackgroundColor3 = COLORS.panel,
+        BorderSizePixel = 0,
+        ClearTextOnFocus = false,
+        ClipsDescendants = true,
+        Position = UDim2.new(1, -PAD, 0, y),
+        AnchorPoint = Vector2.new(1, 0),
+        Size = UDim2.new(0, boxW, 0, 24),
+    }, parent)
+    corner(box, 6)
+    box.FocusLost:Connect(function()
+        if kind == "text" then
+            config[key] = box.Text
+        else
+            local n = tonumber(box.Text)
+            if n and n >= 0 then
+                if kind == "int" then n = math.floor(n) end
+                config[key] = n
+            end
+        end
+        box.Text = tostring(config[key])
+    end)
+end
+
+local function makeList(parent, y, h)
+    local list = new("ScrollingFrame", {
+        Position = UDim2.new(0, PAD, 0, y),
+        Size = UDim2.new(1, -PAD * 2, 0, h),
+        BackgroundColor3 = COLORS.panel,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+        AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    }, parent)
+    corner(list, 8)
+    new("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+    new("UIPadding", { PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4),
+        PaddingRight = UDim.new(0, 4), PaddingBottom = UDim.new(0, 4) }, list)
+    return list
+end
+
+------------------------------------------------------------------
+-- HALAMAN RUTE
+------------------------------------------------------------------
+local btnAddE = makeButton(pageRoute, "📍 Titik E (Panen)", COLORS.green,
+    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfW, 0, 34))
+local btnAddWalk = makeButton(pageRoute, "🚶 Titik Jalan", COLORS.blue,
+    UDim2.new(0, PAD * 2 + halfW, 0, 8), UDim2.new(0, halfW, 0, 34))
+
+local coordLabel = makeLabel(pageRoute, "Posisi: -", UDim2.new(0, PAD, 0, 46),
+    UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 12)
+
+local listFrame = makeList(pageRoute, 70, 110)
+
+local btnUndo = makeButton(pageRoute, "↶ Hapus Terakhir", COLORS.orange,
+    UDim2.new(0, PAD, 0, 186), UDim2.new(0, halfW, 0, 28))
+local btnClear = makeButton(pageRoute, "🗑 Hapus Semua", COLORS.grey,
+    UDim2.new(0, PAD * 2 + halfW, 0, 186), UDim2.new(0, halfW, 0, 28))
+
+addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 222, "int")
+addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 250, "num")
+addSetting(pageRoute, "Delay setelah tekan E (detik)", "eDelay", 278, "num")
+addSetting(pageRoute, "Radius titik (stud)",           "radius", 306, "num")
+addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 334, "num")
+
+------------------------------------------------------------------
+-- HALAMAN PETI
+------------------------------------------------------------------
+local btnAuto = makeButton(pageChest, "📦 Auto Simpan: ON", COLORS.green,
+    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfW, 0, 32))
+local btnScan = makeButton(pageChest, "🔍 Scan Trunk", COLORS.blue,
+    UDim2.new(0, PAD * 2 + halfW, 0, 8), UDim2.new(0, halfW, 0, 32))
+
+local chestInfo = makeLabel(pageChest, "Peti: 0 | Penuh: 0 | Tersimpan: 0 item",
+    UDim2.new(0, PAD, 0, 44), UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 12)
+
+local chestList = makeList(pageChest, 66, 70)
+
+local btnCalib = makeButton(pageChest, "🎯 Kalibrasi Drag", COLORS.blue,
+    UDim2.new(0, PAD, 0, 142), UDim2.new(1, -PAD * 2, 0, 28))
+
+local calibLabel = makeLabel(pageChest, "Kalibrasi: belum diatur", UDim2.new(0, PAD, 0, 172),
+    UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 12)
+
+addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 196, "text", 130, "trunk")
+addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 222, "int", 50)
+addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 248, "num")
+addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 274, "int")
+addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 300, "text", 100, "semua")
+addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 326, "text", 100, "contoh: sabit")
+addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 352, "num")
+addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 378, "num")
+addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 404, "int")
+
+------------------------------------------------------------------
+-- DRAG WINDOW
+------------------------------------------------------------------
+do
+    local dragging, dragStart, startPos
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                      startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+------------------------------------------------------------------
+-- UTILITAS UMUM
+------------------------------------------------------------------
+local function setStatus(t) statusLabel.Text = "Status: " .. t end
+
+local function getChar()
+    local char = player.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if hum and root and hum.Health > 0 then return char, hum, root end
+end
+
+local function alive(id) return running and runId == id end
+
+------------------------------------------------------------------
+-- STATISTIK
+------------------------------------------------------------------
+local function currentElapsed()
+    local e = stats.elapsed
+    if running and stats.runStart then e += os.clock() - stats.runStart end
+    return e
+end
+
+local function updateStats()
+    local e = math.floor(currentElapsed())
+    local timeStr
+    if e >= 3600 then
+        timeStr = string.format("%d:%02d:%02d", e // 3600, (e % 3600) // 60, e % 60)
+    else
+        timeStr = string.format("%02d:%02d", e // 60, e % 60)
+    end
+    statsLabel.Text = string.format("🌱 Panen: %d   |   🔁 Loop: %d   |   ⏱ %s",
+        stats.harvested, stats.loops, timeStr)
+end
+
+local function updateChestInfo()
+    local full = 0
+    for _, c in ipairs(chests) do if c.full then full += 1 end end
+    chestInfo.Text = string.format("Peti: %d | Penuh: %d | Tersimpan: %d item",
+        #chests, full, stats.deposited)
+end
+
+btnResetHarvest.MouseButton1Click:Connect(function()
+    stats.harvested = 0
+    stats.loops = 0
+    stats.deposited = 0
+    stats.elapsed = 0
+    stats.runStart = running and os.clock() or nil
+    updateStats()
+    updateChestInfo()
+    setStatus("Hitungan panen direset")
+end)
+
+------------------------------------------------------------------
+-- LOGIKA TITIK RUTE
+------------------------------------------------------------------
+local function highlight(index)
+    for i, row in pairs(rowRefs) do
+        row.BackgroundColor3 = (i == index) and Color3.fromRGB(80, 90, 120) or COLORS.bar
+    end
+end
+
+local function refreshList()
+    for _, c in ipairs(listFrame:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    rowRefs = {}
+    for i, pt in ipairs(points) do
+        local row = new("Frame", {
+            Size = UDim2.new(1, -4, 0, 26),
+            BackgroundColor3 = COLORS.bar,
+            BorderSizePixel = 0,
+            LayoutOrder = i,
+        }, listFrame)
+        corner(row, 6)
+        rowRefs[i] = row
+
+        local tag = pt.type == "action" and "[E]" or "[Jalan]"
+        makeLabel(row,
+            string.format("%d. %s  (%.0f, %.0f, %.0f)", i, tag, pt.pos.X, pt.pos.Y, pt.pos.Z),
+            UDim2.new(0, 8, 0, 0), UDim2.new(1, -40, 1, 0), Enum.TextXAlignment.Left,
+            pt.type == "action" and Color3.fromRGB(120, 220, 150) or Color3.fromRGB(130, 180, 255), 12)
+
+        local del = makeButton(row, "✕", COLORS.red,
+            UDim2.new(1, -4, 0.5, 0), UDim2.new(0, 22, 0, 20), Vector2.new(1, 0.5))
+        del.MouseButton1Click:Connect(function()
+            if running then return end
+            table.remove(points, i)
+            refreshList()
+        end)
+    end
+end
+
+local function addPoint(kind)
+    if running then setStatus("Stop dulu sebelum menambah titik"); return end
+    local _, _, root = getChar()
+    if not root then setStatus("Karakter tidak ditemukan"); return end
+    table.insert(points, { pos = root.Position, type = kind })
+    refreshList()
+    setStatus(string.format("Titik %d (%s) ditambahkan", #points, kind == "action" and "E" or "Jalan"))
+end
+
+btnAddE.MouseButton1Click:Connect(function() addPoint("action") end)
+btnAddWalk.MouseButton1Click:Connect(function() addPoint("walk") end)
+
+btnUndo.MouseButton1Click:Connect(function()
+    if running then return end
+    table.remove(points)
+    refreshList()
+end)
+btnClear.MouseButton1Click:Connect(function()
+    if running then return end
+    points = {}
+    refreshList()
+    setStatus("Semua titik dihapus")
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        local _, _, root = getChar()
+        if root then
+            local p = root.Position
+            coordLabel.Text = string.format("Posisi: %.1f, %.1f, %.1f", p.X, p.Y, p.Z)
+        end
+        updateStats()
+        task.wait(0.2)
+    end
+end)
+
+------------------------------------------------------------------
+-- LOGIKA PETI: SCAN, TANDA ANGKA, STATUS PENUH
+------------------------------------------------------------------
+local function parseKeywords(str)
+    local out = {}
+    for part in string.gmatch(str or "", "[^,]+") do
+        local k = part:match("^%s*(.-)%s*$"):lower()
+        if k ~= "" then table.insert(out, k) end
+    end
+    return out
+end
+
+local function nameMatches(name, kws)
+    local n = name:lower()
+    for _, k in ipairs(kws) do
+        if n:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+-- khusus peti: bisa cocok persis (exactMatch = 1) atau mengandung kata kunci
+local function chestNameMatches(name, kws)
+    if config.exactMatch == 1 then
+        local n = name:lower()
+        for _, k in ipairs(kws) do
+            if n == k then return true end
+        end
+        return false
+    end
+    return nameMatches(name, kws)
+end
+
+local function isInsideCharacter(inst)
+    for _, pl in ipairs(Players:GetPlayers()) do
+        local ch = pl.Character
+        if ch and (inst == ch or inst:IsDescendantOf(ch)) then return true end
+    end
+    return false
+end
+
+local function getPart(inst)
+    if inst:IsA("BasePart") then return inst end
+    if inst:IsA("Model") then
+        return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true)
+    end
+end
+
+local function chestPos(chest)
+    local ok, cf = pcall(function() return chest.inst:GetPivot() end)
+    if ok and cf then return cf.Position end
+    return chest.part.Position
+end
+
+local function chestValid(chest)
+    return chest.inst and chest.inst.Parent ~= nil and chest.part and chest.part.Parent ~= nil
+end
+
+local function removeMarker(chest)
+    if chest.marker then chest.marker:Destroy() chest.marker = nil end
+end
+
+local function updateMarker(chest)
+    if not chest.marker or not chest.label then return end
+    if chest.full then
+        chest.label.BackgroundColor3 = COLORS.red
+        chest.label.Text = chest.number .. " ✕"
+    else
+        chest.label.BackgroundColor3 = COLORS.chest
+        chest.label.Text = tostring(chest.number)
+    end
+end
+
+local function makeMarker(chest)
+    local bb = new("BillboardGui", {
+        Name = "ChestMark" .. chest.number,
+        Adornee = chest.part,
+        AlwaysOnTop = true,
+        Size = UDim2.new(0, 54, 0, 40),
+        StudsOffset = Vector3.new(0, 3, 0),
+    }, gui)
+    local lbl = new("TextLabel", {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundColor3 = COLORS.chest,
+        TextColor3 = Color3.fromRGB(20, 20, 20),
+        Font = Enum.Font.GothamBlack,
+        TextScaled = true,
+        Text = tostring(chest.number),
+    }, bb)
+    corner(lbl, 10)
+    new("UIStroke", { Color = Color3.fromRGB(20, 20, 20), Thickness = 2 }, lbl)
+    chest.marker = bb
+    chest.label = lbl
+    updateMarker(chest)
+end
+
+local function refreshChestList()
+    for _, c in ipairs(chestList:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    for i, chest in ipairs(chests) do
+        local row = new("Frame", {
+            Size = UDim2.new(1, -4, 0, 26),
+            BackgroundColor3 = COLORS.bar,
+            BorderSizePixel = 0,
+            LayoutOrder = i,
+        }, chestList)
+        corner(row, 6)
+
+        makeLabel(row, string.format("#%d  %s", chest.number, chest.inst.Name),
+            UDim2.new(0, 8, 0, 0), UDim2.new(1, -86, 1, 0), Enum.TextXAlignment.Left,
+            chest.full and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(255, 215, 120), 12)
+
+        local toggle = makeButton(row, chest.full and "PENUH" or "Kosong",
+            chest.full and COLORS.red or COLORS.green,
+            UDim2.new(1, -4, 0.5, 0), UDim2.new(0, 70, 0, 20), Vector2.new(1, 0.5))
+        toggle.TextSize = 11
+        toggle.MouseButton1Click:Connect(function()
+            chest.full = not chest.full
+            updateMarker(chest)
+            updateChestInfo()
+            refreshChestList()
+        end)
+    end
+end
+
+local function scanChests()
+    local _, _, root = getChar()
+    if not root then setStatus("Karakter tidak ditemukan"); return 0 end
+
+    local kws = parseKeywords(config.chestKeywords)
+    if #kws == 0 then setStatus("Isi nama peti dulu"); return 0 end
+
+    for i = #chests, 1, -1 do
+        if not chestValid(chests[i]) then
+            removeMarker(chests[i])
+            table.remove(chests, i)
+        end
+    end
+    local known = {}
+    for _, c in ipairs(chests) do known[c.inst] = true end
+
+    local matched, found = {}, {}
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        if (inst:IsA("Model") or inst:IsA("BasePart"))
+            and chestNameMatches(inst.Name, kws) and not isInsideCharacter(inst) then
+            local skip = false
+            local p = inst.Parent
+            while p and p ~= workspace do
+                if matched[p] then skip = true break end
+                p = p.Parent
+            end
+            if not skip then
+                matched[inst] = true
+                if not known[inst] then
+                    local part = getPart(inst)
+                    if part then
+                        local d = (inst:GetPivot().Position - root.Position).Magnitude
+                        if d <= config.chestScanRadius then
+                            table.insert(found, { inst = inst, part = part, dist = d })
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    table.sort(found, function(a, b) return a.dist < b.dist end)
+
+    for _, f in ipairs(found) do
+        local chest = { inst = f.inst, part = f.part, number = nextChestNo, full = false }
+        nextChestNo += 1
+        makeMarker(chest)
+        table.insert(chests, chest)
+    end
+
+    refreshChestList()
+    updateChestInfo()
+    return #found
+end
+
+local function resetChests()
+    for _, c in ipairs(chests) do removeMarker(c) end
+    chests = {}
+    nextChestNo = 1
+    depositCooldown = 0
+    refreshChestList()
+    updateChestInfo()
+end
+
+btnScan.MouseButton1Click:Connect(function()
+    local n = scanChests()
+    if n > 0 then
+        setStatus(string.format("%d peti baru ditandai (total %d)", n, #chests))
+    elseif #chests == 0 then
+        setStatus("Tidak ada Trunk ditemukan, cek nama/radius")
+    else
+        setStatus("Tidak ada peti baru")
+    end
+end)
+
+btnResetChest.MouseButton1Click:Connect(function()
+    if running then setStatus("Stop dulu sebelum reset peti"); return end
+    resetChests()
+    setStatus("Peti direset. Scan ulang untuk menandai")
+end)
+
+btnAuto.MouseButton1Click:Connect(function()
+    config.autoStore = not config.autoStore
+    btnAuto.Text = config.autoStore and "📦 Auto Simpan: ON" or "📦 Auto Simpan: OFF"
+    btnAuto.BackgroundColor3 = config.autoStore and COLORS.green or COLORS.grey
+end)
+
+------------------------------------------------------------------
+-- KALIBRASI DRAG (posisi slot inventory & area peti di layar)
+------------------------------------------------------------------
+local function updateCalibLabel()
+    if calib.slot and calib.drop then
+        calibLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
+        calibLabel.Text = string.format("Kalibrasi OK | slot2: %s",
+            calib.step and "ya" or "tidak (1 slot)")
+    else
+        calibLabel.TextColor3 = Color3.fromRGB(255, 170, 120)
+        calibLabel.Text = "Kalibrasi: belum diatur"
+    end
+end
+
+local function insideMain(pos)
+    local p, s = main.AbsolutePosition, main.AbsoluteSize
+    return pos.X >= p.X and pos.X <= p.X + s.X and pos.Y >= p.Y and pos.Y <= p.Y + s.Y
+end
+
+local function inputPos(input)
+    if input.UserInputType == Enum.UserInputType.Touch then
+        return Vector2.new(input.Position.X, input.Position.Y + GuiService:GetGuiInset().Y)
+    end
+    return UIS:GetMouseLocation()
+end
+
+local function finishCalib(msg)
+    calibStep = 0
+    btnCalib.Text = "🎯 Kalibrasi Drag"
+    btnCalib.BackgroundColor3 = COLORS.blue
+    updateCalibLabel()
+    setStatus(msg)
+end
+
+btnCalib.MouseButton1Click:Connect(function()
+    if running then setStatus("Stop dulu sebelum kalibrasi"); return end
+    if calibStep > 0 then
+        -- tombol ditekan lagi: batalkan / lewati langkah 3
+        if calibStep == 3 then
+            calib.step = nil
+            finishCalib("Kalibrasi selesai (1 slot)")
+        else
+            finishCalib("Kalibrasi dibatalkan")
+        end
+        return
+    end
+    calib = { slot = nil, step = nil, drop = nil }
+    calibStep = 1
+    btnCalib.Text = "⏹ Batalkan kalibrasi"
+    btnCalib.BackgroundColor3 = COLORS.orange
+    updateCalibLabel()
+    setStatus("1/3 Buka Trunk (F), klik SLOT ITEM pertama di inventory")
+end)
+
+UIS.InputBegan:Connect(function(input)
+    if calibStep == 0 then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+    local pos = inputPos(input)
+    if insideMain(pos) then return end -- klik di panel script diabaikan
+
+    if calibStep == 1 then
+        calib.slot = pos
+        calibStep = 2
+        setStatus("2/3 Klik AREA PETI (tujuan drop, sisi kiri)")
+    elseif calibStep == 2 then
+        calib.drop = pos
+        calibStep = 3
+        setStatus("3/3 (opsional) klik SLOT ITEM ke-2, atau tekan tombol Lewati")
+        btnCalib.Text = "⏭ Lewati slot ke-2"
+    elseif calibStep == 3 then
+        calib.step = pos - calib.slot
+        finishCalib("Kalibrasi selesai")
+    end
+    updateCalibLabel()
+end)
+
+------------------------------------------------------------------
+-- INVENTORY
+------------------------------------------------------------------
+local AMOUNT_NAMES = { "Amount", "Count", "Quantity", "Stack" }
+
+local function countTool(tool)
+    for _, n in ipairs(AMOUNT_NAMES) do
+        local v = tool:GetAttribute(n)
+        if type(v) == "number" then return v end
+    end
+    for _, n in ipairs(AMOUNT_NAMES) do
+        local v = tool:FindFirstChild(n)
+        if v and (v:IsA("IntValue") or v:IsA("NumberValue")) then return v.Value end
+    end
+    return 1
+end
+
+local function allTools()
+    local list = {}
+    local bp = player:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") then table.insert(list, t) end
+        end
+    end
+    local char = player.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") then table.insert(list, t) end
+        end
+    end
+    return list
+end
+
+local function bagIsFull()
+    if CUSTOM_BAG_FULL then
+        local ok, res = pcall(CUSTOM_BAG_FULL)
+        return ok and res == true
+    end
+    local total = 0
+    for _, t in ipairs(allTools()) do total += countTool(t) end
+    return total >= config.bagCapacity
+end
+
+local function collectMaterials(skipTool)
+    local matKw  = parseKeywords(config.materialKeywords)
+    local keepKw = parseKeywords(config.keepKeywords)
+    local out = {}
+    for _, t in ipairs(allTools()) do
+        local ok = true
+        if #matKw > 0 then
+            ok = nameMatches(t.Name, matKw)
+        elseif skipTool and t == skipTool then
+            ok = false -- alat panen yang dipegang tidak ikut disimpan
+        end
+        if ok and #keepKw > 0 and nameMatches(t.Name, keepKw) then ok = false end
+        if ok then table.insert(out, t) end
+    end
+    return out
+end
+
+local function countMaterials(skipTool)
+    if CUSTOM_MATERIAL_COUNT then
+        local ok, n = pcall(CUSTOM_MATERIAL_COUNT)
+        return ok and tonumber(n) or 0
+    end
+    local total = 0
+    for _, t in ipairs(collectMaterials(skipTool)) do total += countTool(t) end
+    return total
+end
+
+------------------------------------------------------------------
+-- GERAK & INPUT
+------------------------------------------------------------------
+local function pressKey(keyCode, hold)
+    pcall(function()
+        VIM:SendKeyEvent(true, keyCode, false, game)
+        task.wait(hold or 0.05)
+        VIM:SendKeyEvent(false, keyCode, false, game)
+    end)
+end
+
+local function pressE() pressKey(Enum.KeyCode.E, 0.05) end
+
+local function openKeyCode()
+    local k = tostring(config.openKey or "F"):upper()
+    local ok, kc = pcall(function() return Enum.KeyCode[k] end)
+    return (ok and kc) or Enum.KeyCode.F
+end
+
+-- seret dari posisi layar A ke B
+local function dragMouse(from, to)
+    pcall(function()
+        VIM:SendMouseMoveEvent(from.X, from.Y, game)
+        task.wait(0.08)
+        VIM:SendMouseButtonEvent(from.X, from.Y, 0, true, game, 0)
+        task.wait(0.12)
+        local steps = 10
+        for i = 1, steps do
+            local p = from:Lerp(to, i / steps)
+            VIM:SendMouseMoveEvent(p.X, p.Y, game)
+            task.wait(0.02)
+        end
+        task.wait(0.08)
+        VIM:SendMouseButtonEvent(to.X, to.Y, 0, false, game, 0)
+    end)
+end
+
+local function walkTo(target, myId, radius)
+    radius = radius or config.radius
+    local start = os.clock()
+    local lastPos, lastCheck = nil, os.clock()
+
+    while alive(myId) do
+        local _, hum, root = getChar()
+        if not root then return false end
+
+        local flat = Vector3.new(root.Position.X - target.X, 0, root.Position.Z - target.Z).Magnitude
+        if flat <= radius and math.abs(root.Position.Y - target.Y) < 8 then
+            return true
+        end
+        if os.clock() - start > config.stepTimeout then
+            return false
+        end
+
+        hum:MoveTo(target)
+
+        if os.clock() - lastCheck >= 1 then
+            if lastPos and (root.Position - lastPos).Magnitude < 0.6 then
+                hum.Jump = true
+            end
+            lastPos = root.Position
+            lastCheck = os.clock()
+        end
+        task.wait(0.1)
+    end
+    return false
+end
+
+local function waitInterruptible(seconds, myId)
+    local t = os.clock()
+    while alive(myId) and os.clock() - t < seconds do
+        task.wait(0.1)
+    end
+end
+
+------------------------------------------------------------------
+-- SIMPAN KE PETI (buka dengan F, seret item ke peti)
+------------------------------------------------------------------
+local function pickChest()
+    for _, c in ipairs(chests) do
+        if not c.full and chestValid(c) then return c end
+    end
+end
+
+local function slotPos(idx)
+    if calib.step and idx > 1 then
+        return calib.slot + calib.step * (idx - 1)
+    end
+    return calib.slot
+end
+
+-- Mengembalikan: "ok", "allfull", "nochest", "nocalib", atau "stopped"
+local function depositAll(myId)
+    local char, hum, root = getChar()
+    if not root then return "stopped" end
+
+    if not (calib.slot and calib.drop) then
+        setStatus("Atur Kalibrasi Drag dulu (tab Peti)")
+        depositCooldown = os.clock() + 30
+        return "nocalib"
+    end
+
+    if #chests == 0 then
+        setStatus("Mencari Trunk terdekat...")
+        scanChests()
+        if #chests == 0 then return "nochest" end
+    end
+
+    local returnPos = root.Position
+    local skipTool = char:FindFirstChildOfClass("Tool")
+    local result = "ok"
+    local deposited = 0
+
+    while alive(myId) do
+        if countMaterials(skipTool) <= 0 then break end
+
+        local chest = pickChest()
+        if not chest then result = "allfull" break end
+
+        -- menuju peti & buka dengan F
+        setStatus(string.format("Menuju peti #%d", chest.number))
+        local standDist = math.max(2, config.chestDist)
+        walkTo(chestPos(chest), myId, standDist)
+        if not alive(myId) then break end
+
+        setStatus(string.format("Membuka peti #%d (%s)", chest.number, config.openKey))
+        pressKey(openKeyCode(), 0.1)
+        waitInterruptible(config.openDelay, myId)
+
+        local idx, fails = 1, 0
+        while alive(myId) and not chest.full do
+            local before = countMaterials(skipTool)
+            if before <= 0 then break end
+
+            setStatus(string.format("Pindah item ke peti #%d (slot %d)", chest.number, idx))
+            dragMouse(slotPos(idx), calib.drop)
+            waitInterruptible(config.depositDelay, myId)
+            local after = countMaterials(skipTool)
+
+            if after < before then
+                local n = before - after
+                deposited += n
+                stats.deposited += n
+                fails = 0
+                updateChestInfo()
+            else
+                fails += 1
+                if fails >= 2 then
+                    if calib.step and idx < config.slotCount then
+                        idx += 1
+                        fails = 0
+                    else
+                        chest.full = true
+                        updateMarker(chest)
+                        updateChestInfo()
+                        refreshChestList()
+                        setStatus(string.format("Peti #%d penuh, pindah peti berikutnya", chest.number))
+                    end
+                end
+            end
+        end
+
+        if config.closeChest == 1 and alive(myId) then
+            pressKey(openKeyCode(), 0.1)
+            task.wait(0.3)
+        end
+    end
+
+    if alive(myId) then
+        setStatus("Kembali ke rute...")
+        walkTo(returnPos, myId, config.radius + 2)
+    end
+
+    if not alive(myId) then return "stopped" end
+    if deposited == 0 and result ~= "allfull" then
+        depositCooldown = os.clock() + 20
+    end
+    return result
+end
+
+------------------------------------------------------------------
+-- START / STOP
+------------------------------------------------------------------
+local function updateButtons()
+    btnStart.BackgroundColor3 = running and COLORS.grey or COLORS.green
+    btnStop.BackgroundColor3  = running and COLORS.red or COLORS.grey
+end
+updateButtons()
+
+local function stopRun(msg)
+    if running and stats.runStart then
+        stats.elapsed += os.clock() - stats.runStart
+    end
+    stats.runStart = nil
+    running = false
+    runId += 1
+    local _, hum, root = getChar()
+    if hum and root then hum:MoveTo(root.Position) end
+    highlight(nil)
+    updateButtons()
+    setStatus(msg or "Berhenti")
+end
+
+local function startRun()
+    if running then return end
+    if calibStep > 0 then setStatus("Selesaikan kalibrasi dulu"); return end
+    if #points == 0 then setStatus("Tambahkan titik dulu!"); return end
+
+    running = true
+    runId += 1
+    local myId = runId
+    stats.runStart = os.clock()
+    updateButtons()
+
+    task.spawn(function()
+        local loopCount = 0
+        while alive(myId) do
+            for i, pt in ipairs(points) do
+                if not alive(myId) then break end
+
+                if config.autoStore and os.clock() >= depositCooldown and bagIsFull() then
+                    setStatus("Tas penuh, menyimpan ke Trunk...")
+                    local res = depositAll(myId)
+                    if res == "allfull" then
+                        stopRun("Semua peti penuh, script berhenti")
+                        return
+                    elseif res == "nochest" then
+                        depositCooldown = os.clock() + 30
+                        setStatus("Tas penuh tapi tidak ada Trunk terdeteksi")
+                    end
+                    if not alive(myId) then break end
+                end
+
+                highlight(i)
+                setStatus(string.format("Loop %d | Menuju titik %d/%d", loopCount + 1, i, #points))
+
+                walkTo(pt.pos, myId)
+
+                if alive(myId) and pt.type == "action" then
+                    task.wait(0.2)
+                    pressE()
+                    stats.harvested += 1
+                    updateStats()
+                    setStatus(string.format("Loop %d | Panen ke-%d (titik %d)", loopCount + 1, stats.harvested, i))
+                    waitInterruptible(config.eDelay, myId)
+                end
+            end
+
+            if not alive(myId) then break end
+
+            loopCount += 1
+            stats.loops += 1
+            updateStats()
+            if config.maxLoops > 0 and loopCount >= config.maxLoops then
+                stopRun(string.format("Selesai (%d loop)", loopCount))
+                return
+            end
+
+            highlight(nil)
+            setStatus(string.format("Loop %d selesai, jeda %ss", loopCount, config.loopDelay))
+            waitInterruptible(config.loopDelay, myId)
+        end
+    end)
+end
+
+btnStart.MouseButton1Click:Connect(startRun)
+btnStop.MouseButton1Click:Connect(function()
+    if running then stopRun("Dihentikan") end
+end)
+
+------------------------------------------------------------------
+-- MINIMIZE & CLOSE
+------------------------------------------------------------------
+local minimized = false
+btnMin.MouseButton1Click:Connect(function()
+    minimized = not minimized
+    btnMin.Text = minimized and "+" or "–"
+    if minimized then
+        content.Visible = false
+        TweenService:Create(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+            { Size = UDim2.new(0, WIN_W, 0, TITLE_H + STRIP_H) }):Play()
+    else
+        TweenService:Create(main, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+            { Size = UDim2.new(0, WIN_W, 0, EXP_H) }):Play()
+        task.delay(0.15, function()
+            if not minimized then content.Visible = true end
+        end)
+    end
+end)
+
+btnClose.MouseButton1Click:Connect(function()
+    running = false
+    runId += 1
+    calibStep = 0
+    for _, c in ipairs(chests) do removeMarker(c) end
+    gui:Destroy()
+end)
+
+setStatus("Siap. Tambah titik, scan Trunk, kalibrasi drag, lalu Start")
