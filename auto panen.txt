@@ -9,7 +9,12 @@
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
-    - Setelah tiap seretan item, tombol pop up "Confirm" diklik otomatis sebelum lanjut item berikutnya
+    - Kalibrasi Drag (tab Peti) sekarang 4 langkah:
+        1) klik slot item pertama, 2) klik area peti (tujuan drop),
+        3) (opsional) klik slot item ke-2, 4) klik POSISI tombol Confirm.
+      Setelah tiap seretan item, skrip mengklik posisi Confirm yang sudah dikalibrasi
+      (tidak mencari lewat teks lagi). Di langkah 4 skrip menyeret 1 item otomatis agar
+      pop up Confirm muncul; jika belum muncul tekan "Seret lagi" di banner.
     - Waktu simpan tiba -> HITUNG RUTE dulu (Pathfinding, 8 titik berdiri di sekeliling peti,
       pilih yang valid & terpendek), baru jalan ke peti. Jika tersangkut di tengah jalan, karakter
       kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
@@ -62,8 +67,7 @@ local config = {
     harvestKey      = "F",     -- tombol panen (mode 1)
     harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
     chestFullNotif  = "chest full, trunk full, storage full",                    -- notifikasi peti penuh
-    confirmText     = "confirm", -- teks tombol pop up konfirmasi setelah item digeser (kosong = nonaktif)
-    confirmWait     = 1.5,     -- maksimal menunggu pop up konfirmasi muncul (detik)
+    confirmDelay    = 0.6,     -- jeda sebelum klik posisi Confirm hasil kalibrasi (detik)
     dragTotal       = 20,      -- jumlah seretan per kunjungan jika isi tas tidak bisa dihitung
     countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
@@ -97,7 +101,7 @@ local runId    = 0
 local rowRefs  = {}
 local stats    = { harvested = 0, loops = 0, deposited = 0, elapsed = 0, runStart = nil }
 local depositCooldown = 0
-local calib    = { slot = nil, step = nil, drop = nil }
+local calib    = { slot = nil, step = nil, drop = nil, confirm = nil }
 local calibStep = 0
 local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
 local harvestPos = nil       -- Vector2 posisi tengah tombol bulat (koordinat layar)
@@ -108,6 +112,8 @@ local nextStoreAt = 0        -- waktu (os.clock) simpan otomatis berikutnya
 local chestFullFlag = false  -- true setelah notifikasi peti penuh terdeteksi
 local minimized = false        -- window sedang diminimize
 local setMinimized = nil       -- diisi di bagian MINIMIZE & CLOSE
+local calibIgnore = false         -- abaikan klik saat skrip menyeret item sendiri (kalibrasi)
+local calibTriggerDrag = nil      -- diisi setelah dragMouse didefinisikan
 local calibWasMin = false      -- status minimize sebelum kalibrasi dimulai
 local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
 
@@ -187,7 +193,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 local ROUTE_CANVAS = 644
-local CHEST_CANVAS = 688
+local CHEST_CANVAS = 668
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -225,14 +231,17 @@ calibText.TextWrapped = true
 calibText.TextYAlignment = Enum.TextYAlignment.Top
 calibText.ZIndex = 21
 local btnBannerCancel = makeButton(calibBanner, "✕ Batal", COLORS.red,
-    UDim2.new(0, 8, 0, 38), UDim2.new(0.5, -12, 0, 20))
+    UDim2.new(0, 8, 0, 38), UDim2.new(0.25, -8, 0, 20))
+local btnBannerRedo = makeButton(calibBanner, "↻ Seret lagi", COLORS.blue,
+    UDim2.new(0.25, 4, 0, 38), UDim2.new(0.35, -6, 0, 20))
 local btnBannerSkip = makeButton(calibBanner, "⏭ Lewati slot ke-2", COLORS.orange,
-    UDim2.new(0.5, 4, 0, 38), UDim2.new(0.5, -12, 0, 20))
-btnBannerCancel.TextSize = 11
-btnBannerSkip.TextSize = 11
-btnBannerCancel.ZIndex = 21
-btnBannerSkip.ZIndex = 21
+    UDim2.new(0.6, 2, 0, 38), UDim2.new(0.4, -10, 0, 20))
+for _, b in ipairs({ btnBannerCancel, btnBannerRedo, btnBannerSkip }) do
+    b.TextSize = 11
+    b.ZIndex = 21
+end
 btnBannerSkip.Visible = false
+btnBannerRedo.Visible = false
 
 local function placeBanner()
     local p, s = main.AbsolutePosition, main.AbsoluteSize
@@ -470,8 +479,7 @@ addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 516, "num")
 addSetting(pageChest, "Notifikasi peti penuh (kata)", "chestFullNotif", 544, "text", 80, "chest full")
 addSetting(pageChest, "Jumlah seret (tanpa hitungan)", "dragTotal", 572, "int", 50)
 addSetting(pageChest, "Hitung rute dulu (1=ya)",      "usePathfind", 600, "int", 50)
-addSetting(pageChest, "Teks tombol Confirm",          "confirmText", 628, "text", 80, "confirm")
-addSetting(pageChest, "Tunggu pop up Confirm (detik)", "confirmWait", 656, "num", 50)
+addSetting(pageChest, "Jeda klik Confirm (detik)",    "confirmDelay", 628, "num", 50)
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -962,15 +970,17 @@ btnAuto.MouseButton1Click:Connect(function()
 end)
 
 ------------------------------------------------------------------
--- KALIBRASI DRAG
+-- KALIBRASI DRAG (4 langkah: slot, area peti, slot ke-2 [opsional], posisi Confirm)
 ------------------------------------------------------------------
 local function updateCalibLabel()
     calibBanner.Visible = calibStep > 0
-    btnBannerSkip.Visible = (calibStep == 3)
+    btnBannerSkip.Visible = (calibStep == 3 or calibStep == 4)
+    btnBannerRedo.Visible = (calibStep == 4)
+    btnBannerSkip.Text = (calibStep == 4) and "⏭ Lewati Confirm" or "⏭ Lewati slot ke-2"
     if calib.slot and calib.drop then
         calibLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
-        calibLabel.Text = string.format("Kalibrasi OK | slot2: %s",
-            calib.step and "ya" or "tidak (1 slot)")
+        calibLabel.Text = string.format("Kalibrasi OK | slot2: %s | confirm: %s",
+            calib.step and "ya" or "tidak", calib.confirm and "ya" or "tidak")
     else
         calibLabel.TextColor3 = Color3.fromRGB(255, 170, 120)
         calibLabel.Text = "Kalibrasi: belum diatur"
@@ -995,6 +1005,7 @@ end
 
 local function finishCalib(msg)
     calibStep = 0
+    calibIgnore = false
     btnCalib.Text = "🎯 Kalibrasi Drag"
     btnCalib.BackgroundColor3 = COLORS.blue
     updateCalibLabel()
@@ -1002,13 +1013,46 @@ local function finishCalib(msg)
     setStatus(msg)
 end
 
+-- langkah 4: skrip menyeret 1 item sendiri agar pop up Confirm muncul, lalu pengguna
+-- mengklik tombol Confirm di layar (POSISI klik disimpan)
+local function triggerConfirmPopup()
+    if not calibTriggerDrag then
+        setStatus("4/4 Seret 1 item sendiri, lalu klik tombol CONFIRM di layar")
+        return
+    end
+    if calibIgnore then return end
+    setStatus("4/4 Menyeret 1 item agar pop up Confirm muncul...")
+    calibIgnore = true
+    task.spawn(function()
+        calibTriggerDrag()
+        task.wait(1)
+        calibIgnore = false
+        if calibStep == 4 then
+            setStatus("4/4 Klik tombol CONFIRM di layar. Pop up tidak muncul? Tekan ↻ Seret lagi")
+        end
+    end)
+end
+
+local function enterStep4()
+    calibStep = 4
+    btnCalib.Text = "⏭ Lewati Confirm"
+    updateCalibLabel()
+    triggerConfirmPopup()
+end
+
 btnBannerCancel.MouseButton1Click:Connect(function()
     if calibStep > 0 then finishCalib("Kalibrasi dibatalkan") end
+end)
+btnBannerRedo.MouseButton1Click:Connect(function()
+    if calibStep == 4 then triggerConfirmPopup() end
 end)
 btnBannerSkip.MouseButton1Click:Connect(function()
     if calibStep == 3 then
         calib.step = nil
-        finishCalib("Kalibrasi selesai (1 slot)")
+        enterStep4()
+    elseif calibStep == 4 then
+        calib.confirm = nil
+        finishCalib("Kalibrasi selesai (tanpa posisi Confirm)")
     end
 end)
 
@@ -1017,24 +1061,27 @@ btnCalib.MouseButton1Click:Connect(function()
     if calibStep > 0 then
         if calibStep == 3 then
             calib.step = nil
-            finishCalib("Kalibrasi selesai (1 slot)")
+            enterStep4()
+        elseif calibStep == 4 then
+            calib.confirm = nil
+            finishCalib("Kalibrasi selesai (tanpa posisi Confirm)")
         else
             finishCalib("Kalibrasi dibatalkan")
         end
         return
     end
-    calib = { slot = nil, step = nil, drop = nil }
+    calib = { slot = nil, step = nil, drop = nil, confirm = nil }
     calibStep = 1
     btnCalib.Text = "⏹ Batalkan kalibrasi"
     calibWasMin = minimized
     if setMinimized then setMinimized(true) end -- minimize otomatis, perintah tampil di banner
     btnCalib.BackgroundColor3 = COLORS.orange
     updateCalibLabel()
-    setStatus("1/3 Buka peti (F), klik SLOT ITEM pertama di inventory")
+    setStatus("1/4 Buka peti (F), klik SLOT ITEM pertama di inventory")
 end)
 
 UIS.InputBegan:Connect(function(input)
-    if calibStep == 0 then return end
+    if calibStep == 0 or calibIgnore then return end
     if input.UserInputType ~= Enum.UserInputType.MouseButton1
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
 
@@ -1044,15 +1091,19 @@ UIS.InputBegan:Connect(function(input)
     if calibStep == 1 then
         calib.slot = pos
         calibStep = 2
-        setStatus("2/3 Klik AREA PETI (tujuan drop, sisi kiri)")
+        setStatus("2/4 Klik AREA PETI (tujuan drop, sisi kiri)")
     elseif calibStep == 2 then
         calib.drop = pos
         calibStep = 3
-        setStatus("3/3 (opsional) klik SLOT ITEM ke-2, atau tekan tombol Lewati")
+        setStatus("3/4 (opsional) klik SLOT ITEM ke-2, atau tekan tombol Lewati")
         btnCalib.Text = "⏭ Lewati slot ke-2"
     elseif calibStep == 3 then
         calib.step = pos - calib.slot
-        finishCalib("Kalibrasi selesai")
+        enterStep4()
+    elseif calibStep == 4 then
+        calib.confirm = pos
+        finishCalib("Kalibrasi selesai (posisi Confirm tersimpan)")
+        return
     end
     updateCalibLabel()
 end)
@@ -1329,6 +1380,10 @@ local function dragMouse(from, to)
         task.wait(0.08)
         VIM:SendMouseButtonEvent(to.X, to.Y, 0, false, game, 0)
     end)
+end
+
+calibTriggerDrag = function()
+    if calib.slot and calib.drop then dragMouse(calib.slot, calib.drop) end
 end
 
 local function waitInterruptible(seconds, myId)
@@ -1618,89 +1673,32 @@ local function smartTravel(goals, finalTarget, myId, radius, fromIdx)
 end
 
 ------------------------------------------------------------------
--- KLIK TOMBOL "Confirm" (pop up setelah item digeser ke peti)
+-- KLIK POSISI "Confirm" (hasil kalibrasi langkah 4)
 ------------------------------------------------------------------
-local function confirmShown(g)
-    if not g.Visible then return false end
-    if g:IsA("TextLabel") or g:IsA("TextButton") then
-        if g.TextTransparency >= 0.9 then return false end
-    end
-    if g.AbsoluteSize.X < 2 or g.AbsoluteSize.Y < 2 then return false end
-    local p = g.Parent
-    while p do
-        if p:IsA("GuiObject") and not p.Visible then return false end
-        if p:IsA("ScreenGui") then return p.Enabled end
-        p = p.Parent
-    end
-    return true
+-- klik satu titik; panel/tombol bulat script disembunyikan sesaat jika menutupi titik itu
+local function clickGuarded(pos)
+    local mainWas = main.Visible
+    local hideMain = insideMain(pos)
+    local hideMarker = markerFrame and markerFrame.Visible and
+        (Vector2.new(markerFrame.Position.X.Offset, markerFrame.Position.Y.Offset) - pos).Magnitude < 30
+    if hideMain then main.Visible = false end
+    if hideMarker then markerFrame.Visible = false end
+    task.wait(0.05)
+    clickAt(pos)
+    task.wait(0.1)
+    if hideMain then main.Visible = mainWas end
+    if hideMarker then markerFrame.Visible = markerShown end
 end
 
--- cari tombol Confirm yang sedang tampil di layar game. return: GuiObject yang diklik
-local function findConfirmButton()
-    local kw = tostring(config.confirmText or ""):lower():match("^%s*(.-)%s*$")
-    if kw == "" then return nil end
-    local pg = player:FindFirstChildOfClass("PlayerGui")
-    if not pg then return nil end
-
-    local exact, loose
-    for _, d in ipairs(pg:GetDescendants()) do
-        if (d:IsA("TextButton") or d:IsA("TextLabel")) and not d:IsDescendantOf(gui)
-            and d.Text ~= "" and #d.Text <= 40 and confirmShown(d) then
-            local txt = d.Text:gsub("<[^>]+>", ""):lower():match("^%s*(.-)%s*$")
-            if txt == kw then
-                -- label bertuliskan Confirm: yang diklik adalah tombol pembungkusnya (jika ada)
-                local target = d
-                if not d:IsA("GuiButton") then
-                    local b = d:FindFirstAncestorWhichIsA("GuiButton")
-                    if b then target = b end
-                end
-                exact = exact or target
-            elseif d:IsA("TextButton") and txt:find(kw, 1, true) then
-                loose = loose or d
-            end
-        end
-    end
-    return exact or loose
-end
-
-local function guiCenter(g)
-    local pos = g.AbsolutePosition + g.AbsoluteSize / 2
-    local sg = g:FindFirstAncestorOfClass("ScreenGui")
-    if sg and not sg.IgnoreGuiInset then
-        pos += GuiService:GetGuiInset() -- koordinat mouse memasukkan tinggi top bar
-    end
-    return pos
-end
-
--- tunggu pop up Confirm muncul lalu klik. return true jika berhasil diklik
+-- klik Confirm setelah item digeser: tunggu pop up muncul lalu klik posisi hasil kalibrasi.
+-- return true jika diklik (false jika posisi Confirm belum dikalibrasi)
 local function clickConfirm(myId)
-    if tostring(config.confirmText or "") == "" then return false end
-    local deadline = os.clock() + math.max(0.2, config.confirmWait)
-    while alive(myId) and os.clock() < deadline do
-        local btn = findConfirmButton()
-        if btn then
-            setStatus("Klik Confirm...")
-            task.wait(0.15) -- beri waktu animasi pop up selesai
-            btn = findConfirmButton() or btn
-            local pos = guiCenter(btn)
-
-            -- sembunyikan sesaat panel/tombol bulat script jika menutupi tombol Confirm
-            local mainWas = main.Visible
-            local hideMain = insideMain(pos)
-            local hideMarker = markerFrame and markerFrame.Visible and
-                (Vector2.new(markerFrame.Position.X.Offset, markerFrame.Position.Y.Offset) - pos).Magnitude < 30
-            if hideMain then main.Visible = false end
-            if hideMarker then markerFrame.Visible = false end
-            task.wait(0.05)
-            clickAt(pos)
-            task.wait(0.1)
-            if hideMain then main.Visible = mainWas end
-            if hideMarker then markerFrame.Visible = markerShown end
-            return true
-        end
-        task.wait(0.1)
-    end
-    return false
+    if not calib.confirm then return false end
+    setStatus("Klik Confirm...")
+    waitInterruptible(config.confirmDelay, myId)
+    if not alive(myId) then return false end
+    clickGuarded(calib.confirm)
+    return true
 end
 
 ------------------------------------------------------------------
