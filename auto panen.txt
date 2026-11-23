@@ -76,7 +76,7 @@ local config = {
     lookahead       = 5,       -- titik bidik di depan pada garis rute (stud)
     -- peti
     autoStore       = true,
-    storeInterval   = 5,       -- simpan otomatis tiap berapa menit (0 = nonaktif)
+    storeInterval   = 20,       -- simpan otomatis tiap berapa menit (0 = nonaktif)
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
