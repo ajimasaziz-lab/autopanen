@@ -1,16 +1,15 @@
 --[[
     🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
-    - Titik Panen : player berjalan (tombol WASD) ke titik, menekan tombol panen (F), lanjut
+    - Titik Panen : player berjalan (WASD) ke titik, menekan tombol panen (F), lanjut
     - Titik Jalan : player hanya melewati titik
-    - Penghitung panen / loop / waktu (tetap tampil saat minimize)
-    - Tas penuh -> jalan ke Trunk, tekan F (buka peti), seret item dari
-      inventory ke area peti (kiri)
-      * peti ditandai angka, peti penuh ditandai merah dan tidak diisi lagi
-      * lanjut ke peti berikutnya sesuai nomor
-    - Tombol Reset Panen dan Reset Peti
+    - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
+      Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
+    - Tas penuh -> jalan ke peti. Jika tersangkut di tengah jalan, karakter
+      kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
+      lalu mencoba mendekati peti lagi dari titik rute tersebut.
+    - Scan peti: nama default "trunk, chest" (otomatis kena "Mimic Chest").
+      Tombol "Cek Objek Sekitar" membantu mencari nama chest yang belum diketahui.
     - Perlu KALIBRASI DRAG sekali (tab Peti)
-    - Jalan memakai WASD, scan peti memakai bounding box
-    - Tombol panen bisa diganti di tab Rute (default F)
 ]]
 
 local Players      = game:GetService("Players")
@@ -24,9 +23,7 @@ local player = Players.LocalPlayer
 ------------------------------------------------------------------
 -- HOOK OPSIONAL
 ------------------------------------------------------------------
--- function() -> true jika tas penuh
 local CUSTOM_BAG_FULL = nil
--- function() -> jumlah item material di tas (jika inventory game kamu bukan Tool)
 local CUSTOM_MATERIAL_COUNT = nil
 
 ------------------------------------------------------------------
@@ -51,37 +48,41 @@ local config = {
     -- rute
     maxLoops        = 0,
     loopDelay       = 2,
-    eDelay          = 1,       -- jeda setelah panen (detik)
+    eDelay          = 1,
     radius          = 3,
     stepTimeout     = 15,
-    useWASD         = 1,       -- 1 = jalan pakai tombol WASD, 0 = pakai Humanoid:MoveTo
-    harvestKey      = "F",     -- tombol panen
+    useWASD         = 1,
+    harvestKey      = "F",
+    retryPerPoint   = 3,       -- berapa kali coba ulang satu titik (mundur lalu maju lagi)
+    lookahead       = 5,       -- titik bidik di depan pada garis rute (stud)
     -- peti
     autoStore       = true,
-    bagCapacity     = 20,      -- tas penuh jika jumlah item >= angka ini
-    chestKeywords   = "trunk", -- nama peti di game
-    exactMatch      = 0,       -- 1 = nama harus persis sama (hindari batang pohon)
-    chestScanRadius = 50,      -- radius scan peti (stud)
-    chestDist       = 4,       -- jarak berdiri dari peti (stud)
-    materialKeywords = "",     -- kosong = semua item (kecuali yang dikecualikan)
-    keepKeywords    = "",      -- item yang TIDAK boleh disimpan
-    depositDelay    = 0.6,     -- jeda setelah tiap seretan (detik)
-    openKey         = "F",     -- tombol buka peti
-    openDelay       = 1,       -- tunggu UI peti terbuka (detik)
-    slotCount       = 1,       -- berapa slot yang dicoba jika slot pertama gagal
-    closeChest      = 0,       -- 1 = tekan F lagi untuk menutup peti setelah selesai
+    bagCapacity     = 20,
+    chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
+    exactMatch      = 0,
+    chestScanRadius = 50,
+    chestDist       = 4,
+    stuckLimit      = 3,       -- detik tanpa gerak sebelum dianggap tersangkut (menuju peti)
+    materialKeywords = "",
+    keepKeywords    = "",
+    depositDelay    = 0.6,
+    openKey         = "F",
+    openDelay       = 1,
+    slotCount       = 1,
+    closeChest      = 0,
 }
 
-local points   = {}   -- { pos = Vector3, type = "action" | "walk" }
-local chests   = {}   -- { inst, part, number, full, marker, label }
+local points   = {}
+local chests   = {}
 local nextChestNo = 1
 local running  = false
 local runId    = 0
 local rowRefs  = {}
 local stats    = { harvested = 0, loops = 0, deposited = 0, elapsed = 0, runStart = nil }
 local depositCooldown = 0
-local calib    = { slot = nil, step = nil, drop = nil }  -- Vector2 posisi layar
+local calib    = { slot = nil, step = nil, drop = nil }
 local calibStep = 0
+local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
 
 ------------------------------------------------------------------
 -- HELPER UI
@@ -151,21 +152,20 @@ local WIN_W   = 310
 local TITLE_H = 40
 local STRIP_H = 24
 local TAB_H   = 34
-local VIEW_H  = math.clamp(math.floor(vpY * 0.4), 150, 250) -- tinggi area scroll
+local VIEW_H  = math.clamp(math.floor(vpY * 0.4), 150, 250)
 local FOOT_H  = 62
 local CONTENT_H = TAB_H + VIEW_H + FOOT_H
 local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
 local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
--- tinggi isi tiap halaman (yang di-scroll)
-local ROUTE_CANVAS = 432
-local CHEST_CANVAS = 436
+local ROUTE_CANVAS = 480
+local CHEST_CANVAS = 516
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
     ResetOnSpawn = false,
-    IgnoreGuiInset = true, -- koordinat GUI sama dengan koordinat mouse
+    IgnoreGuiInset = true,
     ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 }, parentGui)
 
@@ -268,7 +268,6 @@ local statusLabel = makeLabel(footer, "Status: Siap", UDim2.new(0, PAD, 0, 36),
     UDim2.new(1, -PAD * 2, 0, 22), Enum.TextXAlignment.Left, COLORS.sub, 11)
 statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
 
--- margin kanan ekstra agar tidak tertutup scrollbar
 local RPAD = PAD + 6
 
 local function addSetting(parent, labelText, key, y, kind, boxW, placeholder)
@@ -323,7 +322,7 @@ local function makeList(parent, y, h)
     return list
 end
 
-local halfR = (WIN_W - PAD - RPAD - 6) / 2 -- lebar setengah untuk tombol di dalam area scroll
+local halfR = (WIN_W - PAD - RPAD - 6) / 2
 
 ------------------------------------------------------------------
 -- HALAMAN RUTE
@@ -350,13 +349,15 @@ addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
 addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
 addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
 addSetting(pageRoute, "Tombol panen",                  "harvestKey", 388, "text", 50, "F")
+addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 416, "int", 50)
+addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 444, "num", 50)
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
 ------------------------------------------------------------------
 local btnAuto = makeButton(pageChest, "📦 Auto Simpan: ON", COLORS.green,
     UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfR, 0, 30))
-local btnScan = makeButton(pageChest, "🔍 Scan Trunk", COLORS.blue,
+local btnScan = makeButton(pageChest, "🔍 Scan Peti", COLORS.blue,
     UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 30))
 
 local chestInfo = makeLabel(pageChest, "Peti: 0 | Penuh: 0 | Tersimpan: 0 item",
@@ -370,15 +371,20 @@ local btnCalib = makeButton(pageChest, "🎯 Kalibrasi Drag", COLORS.blue,
 local calibLabel = makeLabel(pageChest, "Kalibrasi: belum diatur", UDim2.new(0, PAD, 0, 170),
     UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 11)
 
-addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 196, "text", 110, "trunk")
-addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 224, "int", 50)
-addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 252, "num")
-addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 280, "int")
-addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 308, "text", 80, "semua")
-addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 336, "text", 80, "contoh: sabit")
-addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 364, "num")
-addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 392, "num")
-addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 420, "int")
+local btnInspect = makeButton(pageChest, "🔎 Cek Objek Sekitar (cari nama chest)", COLORS.grey,
+    UDim2.new(0, PAD, 0, 196), UDim2.new(1, -PAD - RPAD, 0, 28))
+btnInspect.TextSize = 11
+
+addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 232, "text", 110, "trunk, chest")
+addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 260, "int", 50)
+addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 288, "num")
+addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 316, "int")
+addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 344, "text", 80, "semua")
+addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 372, "text", 80, "contoh: sabit")
+addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 400, "num")
+addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 428, "num")
+addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 456, "int")
+addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 484, "num")
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -420,6 +426,10 @@ local function getChar()
 end
 
 local function alive(id) return running and runId == id end
+
+local function flatDist(a, b)
+    return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
+end
 
 ------------------------------------------------------------------
 -- STATISTIK
@@ -556,7 +566,6 @@ local function nameMatches(name, kws)
     return false
 end
 
--- khusus peti: bisa cocok persis (exactMatch = 1) atau mengandung kata kunci
 local function chestNameMatches(name, kws)
     if config.exactMatch == 1 then
         local n = name:lower()
@@ -583,7 +592,6 @@ local function getPart(inst)
     end
 end
 
--- kotak batas objek (lebih akurat daripada pivot, yang bisa jauh dari bentuk asli)
 local function boundsOf(inst)
     if inst:IsA("Model") then
         local ok, cf, size = pcall(function() return inst:GetBoundingBox() end)
@@ -593,7 +601,6 @@ local function boundsOf(inst)
     end
 end
 
--- jarak dari titik ke permukaan kotak batas
 local function distToBox(cf, size, pos)
     local lp = cf:PointToObjectSpace(pos)
     local h = size / 2
@@ -610,7 +617,6 @@ local function chestPos(chest)
     return chest.part.Position
 end
 
--- jarak berdiri dari pusat peti (disesuaikan ukuran peti agar bisa dicapai)
 local function chestStandDist(chest)
     local _, size = boundsOf(chest.inst)
     local d = math.max(2, config.chestDist)
@@ -692,7 +698,6 @@ local function refreshChestList()
     end
 end
 
--- Mengembalikan: jumlah peti baru, tabel info (outside, nearestOutside, unloaded)
 local function scanChests()
     local info = { outside = 0, nearestOutside = nil, unloaded = 0 }
     local _, _, root = getChar()
@@ -814,11 +819,45 @@ btnScan.MouseButton1Click:Connect(function()
     if n > 0 then
         setStatus(string.format("%d peti baru (total %d)%s", n, #chests, extra))
     elseif #chests == 0 then
-        setStatus("Tidak ada Trunk ditemukan" .. extra)
+        setStatus("Tidak ada peti ditemukan" .. extra)
     else
         setStatus("Tidak ada peti baru" .. extra)
     end
 end)
+
+-- Bantu cari nama chest yang belum diketahui:
+-- berdiri dekat chest, tekan tombol ini, lihat nama di status & console (F9).
+local function inspectNearby()
+    local _, _, root = getChar()
+    if not root then setStatus("Karakter tidak ditemukan"); return end
+    local seen, names = {}, {}
+    print("[AutoPanen] === Objek interaktif dalam 40 stud ===")
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") or d:IsA("ClickDetector") then
+            local part = d.Parent
+            if part and part:IsA("Attachment") then part = part.Parent end
+            if part and part:IsA("BasePart") and (part.Position - root.Position).Magnitude <= 40 then
+                local owner = part:FindFirstAncestorOfClass("Model") or part
+                if not seen[owner] then
+                    seen[owner] = true
+                    table.insert(names, owner.Name)
+                    local extra = ""
+                    if d:IsA("ProximityPrompt") then
+                        extra = string.format(" | ObjectText='%s' ActionText='%s'", d.ObjectText, d.ActionText)
+                    end
+                    print(string.format("[AutoPanen]  - %s | %.0f stud%s",
+                        owner:GetFullName(), (part.Position - root.Position).Magnitude, extra))
+                end
+            end
+        end
+    end
+    if #names == 0 then
+        setStatus("Tidak ada objek interaktif dalam 40 stud")
+    else
+        setStatus("Objek: " .. table.concat(names, ", ") .. " (lihat F9)")
+    end
+end
+btnInspect.MouseButton1Click:Connect(inspectNearby)
 
 btnResetChest.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum reset peti"); return end
@@ -833,7 +872,7 @@ btnAuto.MouseButton1Click:Connect(function()
 end)
 
 ------------------------------------------------------------------
--- KALIBRASI DRAG (posisi slot inventory & area peti di layar)
+-- KALIBRASI DRAG
 ------------------------------------------------------------------
 local function updateCalibLabel()
     if calib.slot and calib.drop then
@@ -882,7 +921,7 @@ btnCalib.MouseButton1Click:Connect(function()
     btnCalib.Text = "⏹ Batalkan kalibrasi"
     btnCalib.BackgroundColor3 = COLORS.orange
     updateCalibLabel()
-    setStatus("1/3 Buka Trunk (F), klik SLOT ITEM pertama di inventory")
+    setStatus("1/3 Buka peti (F), klik SLOT ITEM pertama di inventory")
 end)
 
 UIS.InputBegan:Connect(function(input)
@@ -891,7 +930,7 @@ UIS.InputBegan:Connect(function(input)
         and input.UserInputType ~= Enum.UserInputType.Touch then return end
 
     local pos = inputPos(input)
-    if insideMain(pos) then return end -- klik di panel script diabaikan
+    if insideMain(pos) then return end
 
     if calibStep == 1 then
         calib.slot = pos
@@ -962,7 +1001,7 @@ local function collectMaterials(skipTool)
         if #matKw > 0 then
             ok = nameMatches(t.Name, matKw)
         elseif skipTool and t == skipTool then
-            ok = false -- alat panen yang dipegang tidak ikut disimpan
+            ok = false
         end
         if ok and #keepKw > 0 and nameMatches(t.Name, keepKw) then ok = false end
         if ok then table.insert(out, t) end
@@ -1011,13 +1050,9 @@ local function keyFromName(name, default)
     return (ok and kc) or default
 end
 
--- tombol panen (default F)
 local function pressHarvest() pressKey(keyFromName(config.harvestKey, KC.F), 0.05) end
-
--- tombol buka peti (default F)
 local function openKeyCode() return keyFromName(config.openKey, KC.F) end
 
--- arahkan karakter ke target dengan menekan W/A/S/D relatif terhadap kamera
 local function steerTo(root, target)
     local cam = workspace.CurrentCamera
     local dir = Vector3.new(target.X - root.Position.X, 0, target.Z - root.Position.Z)
@@ -1043,7 +1078,6 @@ local function steerTo(root, target)
     setKey(KC.A, r < -0.3)
 end
 
--- seret dari posisi layar A ke B
 local function dragMouse(from, to)
     pcall(function()
         VIM:SendMouseMoveEvent(from.X, from.Y, game)
@@ -1061,56 +1095,6 @@ local function dragMouse(from, to)
     end)
 end
 
-local function walkTo(target, myId, radius)
-    radius = radius or config.radius
-    local start = os.clock()
-    local lastPos, lastCheck = nil, os.clock()
-    local jumpRelease = nil
-    local result = false
-
-    while alive(myId) do
-        local _, hum, root = getChar()
-        if not root then break end
-
-        local flat = Vector3.new(root.Position.X - target.X, 0, root.Position.Z - target.Z).Magnitude
-        if flat <= radius and math.abs(root.Position.Y - target.Y) < 12 then
-            result = true
-            break
-        end
-        if os.clock() - start > config.stepTimeout then
-            break
-        end
-
-        if config.useWASD == 1 then
-            steerTo(root, target)
-        else
-            hum:MoveTo(target)
-        end
-
-        -- deteksi nyangkut -> lompat
-        if os.clock() - lastCheck >= 1 then
-            if lastPos and (root.Position - lastPos).Magnitude < 0.6 then
-                if config.useWASD == 1 then
-                    setKey(KC.Space, true)
-                    jumpRelease = os.clock() + 0.2
-                else
-                    hum.Jump = true
-                end
-            end
-            lastPos = root.Position
-            lastCheck = os.clock()
-        end
-        if jumpRelease and os.clock() >= jumpRelease then
-            setKey(KC.Space, false)
-            jumpRelease = nil
-        end
-        task.wait(0.05)
-    end
-
-    releaseMoveKeys()
-    return result
-end
-
 local function waitInterruptible(seconds, myId)
     local t = os.clock()
     while alive(myId) and os.clock() - t < seconds do
@@ -1119,11 +1103,192 @@ local function waitInterruptible(seconds, myId)
 end
 
 ------------------------------------------------------------------
--- SIMPAN KE PETI (buka dengan F, seret item ke peti)
+-- NAVIGASI
 ------------------------------------------------------------------
-local function pickChest()
+--[[
+    driveTo(target, myId, opts)
+    opts.radius     : jarak dianggap sampai
+    opts.timeout    : batas waktu (detik)
+    opts.stuckLimit : jika diisi, return "stuck" setelah sekian detik tanpa gerak
+                      (jika kosong: hanya lompat & terus mencoba sampai timeout)
+    opts.line       : {a, b} -> karakter dipaksa mengikuti GARIS a->b
+                      (membidik titik di depan pada garis, jadi tidak melenceng)
+    Return: "reached" | "stuck" | "timeout" | "stopped"
+]]
+local function driveTo(target, myId, opts)
+    opts = opts or {}
+    local radius     = opts.radius or config.radius
+    local timeout    = opts.timeout or config.stepTimeout
+    local stuckLimit = opts.stuckLimit
+    local line       = opts.line
+
+    local start = os.clock()
+    local lastPos, lastCheck = nil, os.clock()
+    local stuckFor, jumpRelease = 0, nil
+    local result = "timeout"
+
+    while alive(myId) do
+        local _, hum, root = getChar()
+        if not root then result = "stopped" break end
+        local pos = root.Position
+
+        if flatDist(pos, target) <= radius and math.abs(pos.Y - target.Y) < 12 then
+            result = "reached"
+            break
+        end
+        if os.clock() - start > timeout then
+            result = "timeout"
+            break
+        end
+
+        -- titik bidik: di garis rute (kalau ada), selain itu langsung ke target
+        local aim = target
+        if line then
+            local a, b = line[1], line[2]
+            local ab = Vector3.new(b.X - a.X, 0, b.Z - a.Z)
+            local len = ab.Magnitude
+            if len > 0.1 then
+                local dir = ab / len
+                local t = math.clamp(Vector3.new(pos.X - a.X, 0, pos.Z - a.Z):Dot(dir), 0, len)
+                local ahead = math.min(len, t + config.lookahead)
+                aim = Vector3.new(a.X + dir.X * ahead, b.Y, a.Z + dir.Z * ahead)
+            end
+        end
+
+        if config.useWASD == 1 then
+            steerTo(root, aim)
+        else
+            hum:MoveTo(aim)
+        end
+
+        -- deteksi nyangkut tiap 1 detik
+        if os.clock() - lastCheck >= 1 then
+            if lastPos and (pos - lastPos).Magnitude < 0.6 then
+                stuckFor += 1
+                if config.useWASD == 1 then
+                    setKey(KC.Space, true)
+                    jumpRelease = os.clock() + 0.2
+                else
+                    hum.Jump = true
+                end
+            else
+                stuckFor = 0
+            end
+            lastPos = pos
+            lastCheck = os.clock()
+        end
+        if jumpRelease and os.clock() >= jumpRelease then
+            setKey(KC.Space, false)
+            jumpRelease = nil
+        end
+        if stuckLimit and stuckFor >= stuckLimit then
+            result = "stuck"
+            break
+        end
+        task.wait(0.05)
+    end
+
+    releaseMoveKeys()
+    return result
+end
+
+-- Berjalan dari titik a ke b HANYA di garis rute. Jika gagal: mundur ke a,
+-- lalu coba lagi di jalur yang sama. Return "reached" | "failed" | "stopped"
+local function walkRoute(a, b, myId)
+    local tries = math.max(1, config.retryPerPoint)
+    for attempt = 1, tries do
+        local r = driveTo(b, myId, {
+            radius = config.radius, timeout = config.stepTimeout, line = { a, b },
+        })
+        if r == "reached" then return "reached" end
+        if r == "stopped" or not alive(myId) then return "stopped" end
+
+        if attempt < tries then
+            setStatus(string.format("Tersangkut, mundur di jalur & coba lagi (%d/%d)", attempt, tries))
+            local rr = driveTo(a, myId, {
+                radius = config.radius + 1, timeout = config.stepTimeout, line = { b, a },
+            })
+            if rr == "stopped" or not alive(myId) then return "stopped" end
+        end
+    end
+    return "failed"
+end
+
+local function nearestIdx(pos)
+    local best, bd
+    for i, p in ipairs(points) do
+        local d = flatDist(p.pos, pos)
+        if not bd or d < bd then best, bd = i, d end
+    end
+    return best
+end
+
+--[[
+    travel: menuju target (peti / kembali ke rute) secara langsung.
+    Jika tersangkut -> kembali ke jalur panen, ikuti titik-titik rute menuju
+    titik rute terdekat dengan target, dan setelah tiap titik coba lagi
+    mendekati target dari situ.
+    fromIdx: titik rute awal untuk fallback (default: terdekat dengan karakter)
+    Return: "reached" | "failed" | "stopped"
+]]
+local function travel(target, myId, radius, fromIdx)
+    radius = radius or config.radius
+    local function direct()
+        return driveTo(target, myId, {
+            radius = radius, timeout = config.stepTimeout, stuckLimit = config.stuckLimit,
+        })
+    end
+
+    local r = direct()
+    if r == "reached" or r == "stopped" then return r end
+
+    local n = #points
+    if n == 0 then return "failed" end
+    local _, _, root = getChar()
+    if not root then return "stopped" end
+
+    setStatus("Tersangkut, ikuti jalur panen...")
+    local cur = fromIdx or nearestIdx(root.Position)
+    local to  = nearestIdx(target)
+
+    -- kembali dulu ke jalur panen
+    local back = driveTo(points[cur].pos, myId, {
+        radius = config.radius + 1, timeout = config.stepTimeout,
+    })
+    if back == "stopped" or not alive(myId) then return "stopped" end
+
+    local fwd = (to - cur) % n
+    local bwd = (cur - to) % n
+    local step = (fwd <= bwd) and 1 or -1
+    local count = math.min(fwd, bwd)
+
+    for hop = 0, count do
+        if hop > 0 then
+            local nxt = (cur - 1 + step) % n + 1
+            local w = walkRoute(points[cur].pos, points[nxt].pos, myId)
+            if w == "stopped" then return "stopped" end
+            cur = nxt
+        end
+
+        setStatus(string.format("Dari titik rute %d, coba mendekati tujuan", cur))
+        local d = direct()
+        if d == "reached" or d == "stopped" then return d end
+
+        -- gagal lagi: balik ke jalur sebelum lanjut
+        local bk = driveTo(points[cur].pos, myId, {
+            radius = config.radius + 1, timeout = config.stepTimeout,
+        })
+        if bk == "stopped" or not alive(myId) then return "stopped" end
+    end
+    return "failed"
+end
+
+------------------------------------------------------------------
+-- SIMPAN KE PETI
+------------------------------------------------------------------
+local function pickChest(skip)
     for _, c in ipairs(chests) do
-        if not c.full and chestValid(c) then return c end
+        if not c.full and chestValid(c) and not skip[c] then return c end
     end
 end
 
@@ -1134,7 +1299,7 @@ local function slotPos(idx)
     return calib.slot
 end
 
--- Mengembalikan: "ok", "allfull", "nochest", "nocalib", atau "stopped"
+-- Return: "ok", "allfull", "unreachable", "nochest", "nocalib", "stopped"
 local function depositAll(myId)
     local char, hum, root = getChar()
     if not root then return "stopped" end
@@ -1145,25 +1310,34 @@ local function depositAll(myId)
         return "nocalib"
     end
 
-    setStatus("Mencari Trunk terdekat...")
-    scanChests() -- tambahkan Trunk baru yang masuk radius
+    setStatus("Mencari peti terdekat...")
+    scanChests()
     if #chests == 0 then return "nochest" end
 
     local returnPos = root.Position
+    local leftIdx = routeIdx
     local skipTool = char:FindFirstChildOfClass("Tool")
     local result = "ok"
     local deposited = 0
+    local skip = {}
 
     while alive(myId) do
         if countMaterials(skipTool) <= 0 then break end
 
-        local chest = pickChest()
-        if not chest then result = "allfull" break end
+        local chest = pickChest(skip)
+        if not chest then
+            result = next(skip) and "unreachable" or "allfull"
+            break
+        end
 
-        -- menuju peti & buka dengan F
         setStatus(string.format("Menuju peti #%d", chest.number))
-        walkTo(chestPos(chest), myId, chestStandDist(chest))
+        local tr = travel(chestPos(chest), myId, chestStandDist(chest), leftIdx)
         if not alive(myId) then break end
+        if tr ~= "reached" then
+            skip[chest] = true
+            setStatus(string.format("Peti #%d tidak terjangkau, coba peti lain", chest.number))
+            continue
+        end
 
         setStatus(string.format("Membuka peti #%d (%s)", chest.number, config.openKey))
         pressKey(openKeyCode(), 0.1)
@@ -1208,9 +1382,11 @@ local function depositAll(myId)
         end
     end
 
+    -- kembali ke jalur panen (titik rute terakhir), mengikuti rute bila tersangkut
     if alive(myId) then
-        setStatus("Kembali ke rute...")
-        walkTo(returnPos, myId, config.radius + 2)
+        setStatus("Kembali ke jalur panen...")
+        local dest = (leftIdx and points[leftIdx]) and points[leftIdx].pos or returnPos
+        travel(dest, myId, config.radius + 1, nil)
     end
 
     if not alive(myId) then return "stopped" end
@@ -1252,6 +1428,7 @@ local function startRun()
     running = true
     runId += 1
     local myId = runId
+    routeIdx = nil
     stats.runStart = os.clock()
     updateButtons()
 
@@ -1262,14 +1439,17 @@ local function startRun()
                 if not alive(myId) then break end
 
                 if config.autoStore and os.clock() >= depositCooldown and bagIsFull() then
-                    setStatus("Tas penuh, menyimpan ke Trunk...")
+                    setStatus("Tas penuh, menyimpan ke peti...")
                     local res = depositAll(myId)
                     if res == "allfull" then
                         stopRun("Semua peti penuh, script berhenti")
                         return
                     elseif res == "nochest" then
                         depositCooldown = os.clock() + 30
-                        setStatus("Tas penuh tapi tidak ada Trunk terdeteksi")
+                        setStatus("Tas penuh tapi tidak ada peti terdeteksi")
+                    elseif res == "unreachable" then
+                        depositCooldown = os.clock() + 30
+                        setStatus("Peti tidak terjangkau, lanjut panen")
                     end
                     if not alive(myId) then break end
                 end
@@ -1277,15 +1457,27 @@ local function startRun()
                 highlight(i)
                 setStatus(string.format("Loop %d | Menuju titik %d/%d", loopCount + 1, i, #points))
 
-                walkTo(pt.pos, myId)
+                -- MODE PANEN: hanya lewat garis rute (titik sebelumnya -> titik ini)
+                local r
+                if routeIdx and points[routeIdx] then
+                    r = walkRoute(points[routeIdx].pos, pt.pos, myId)
+                else
+                    r = travel(pt.pos, myId, config.radius) -- awal: belum ada titik acuan
+                end
+                if not alive(myId) then break end
 
-                if alive(myId) and pt.type == "action" then
-                    task.wait(0.2)
-                    pressHarvest()
-                    stats.harvested += 1
-                    updateStats()
-                    setStatus(string.format("Loop %d | Panen ke-%d (titik %d)", loopCount + 1, stats.harvested, i))
-                    waitInterruptible(config.eDelay, myId)
+                if r == "reached" then
+                    routeIdx = i
+                    if pt.type == "action" then
+                        task.wait(0.2)
+                        pressHarvest()
+                        stats.harvested += 1
+                        updateStats()
+                        setStatus(string.format("Loop %d | Panen ke-%d (titik %d)", loopCount + 1, stats.harvested, i))
+                        waitInterruptible(config.eDelay, myId)
+                    end
+                else
+                    setStatus(string.format("Titik %d gagal dicapai, lanjut titik berikutnya", i))
                 end
             end
 
@@ -1340,4 +1532,4 @@ btnClose.MouseButton1Click:Connect(function()
     gui:Destroy()
 end)
 
-setStatus("Siap. Tambah titik, scan Trunk, kalibrasi drag, lalu Start")
+setStatus("Siap. Tambah titik, scan peti, kalibrasi drag, lalu Start")
