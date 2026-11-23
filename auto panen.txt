@@ -5,6 +5,9 @@
                     panen di layar, lalu dikunci; mode 1 = tekan tombol F), lanjut
     - Titik Jalan : player hanya melewati titik
     - Auto simpan berjalan berkala: tiap N menit (pengaturan "Simpan otomatis tiap", tab Peti)
+    - SIMPAN BERGANTIAN: simpan ke-1 masuk peti #1, simpan ke-2 masuk peti #2, dst.
+      Setelah peti terakhir, kembali ke peti #1. Peti PENUH / tidak terjangkau dilewati.
+      (Atur di tab Peti: "Simpan bergantian (1=ya)")
     - Penghitung panen membaca teks notifikasi di layar ("Harvested ... xN")
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
@@ -89,6 +92,7 @@ local config = {
     openKey         = "F",
     openDelay       = 3,       -- tunggu setelah menekan tombol buka peti (detik)
     closeChest      = 0,
+    rotateChest     = 1,       -- 1 = simpan bergantian antar peti, 0 = selalu peti pertama yang belum penuh
 }
 
 local points   = {}
@@ -116,6 +120,7 @@ local calibWasMin = false      -- status minimize sebelum kalibrasi dimulai
 local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
 local trail = {}             -- jejak langkah saat mendekati peti (untuk jalan pulang)
 local trailOn = false        -- true = driveTo mencatat jejak
+local lastStoreNo = 0        -- nomor peti terakhir yang dipakai menyimpan (untuk giliran berikutnya)
 
 ------------------------------------------------------------------
 -- HELPER UI
@@ -193,7 +198,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 local ROUTE_CANVAS = 678
-local CHEST_CANVAS = 688
+local CHEST_CANVAS = 716
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -484,6 +489,7 @@ addSetting(pageChest, "Hitung rute dulu (1=ya)",      "usePathfind", 572, "int",
 addSetting(pageChest, "Tunggu Confirm muncul (detik)", "confirmDelay", 600, "num", 50)
 addSetting(pageChest, "Jeda Confirm -> Sort (detik)", "sortDelay", 628, "num", 50)
 addSetting(pageChest, "Jeda setelah Sort (detik)",    "depositDelay", 656, "num", 50)
+addSetting(pageChest, "Simpan bergantian (1=ya)",     "rotateChest", 684, "int", 50)
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -993,6 +999,7 @@ local function resetChests()
     for _, c in ipairs(chests) do removeMarker(c) end
     chests = {}
     nextChestNo = 1
+    lastStoreNo = 0   -- giliran simpan kembali ke peti #1
     depositCooldown = 0
     refreshChestList()
     updateChestInfo()
@@ -1811,9 +1818,21 @@ local function clickGuarded(pos)
     if hideMarker then markerFrame.Visible = markerShown end
 end
 
+-- Pilih peti untuk menyimpan.
+-- rotateChest = 1 : bergantian. Ambil peti dengan nomor SETELAH peti yang terakhir dipakai
+--                   (peti penuh / tidak terjangkau dilewati). Setelah peti terakhir, kembali ke awal.
+-- rotateChest = 0 : selalu peti pertama yang belum penuh (cara lama).
 local function pickChest(skip)
+    local function usable(c)
+        return not c.full and chestValid(c) and not skip[c]
+    end
+    if config.rotateChest == 1 then
+        for _, c in ipairs(chests) do
+            if c.number > lastStoreNo and usable(c) then return c end
+        end
+    end
     for _, c in ipairs(chests) do
-        if not c.full and chestValid(c) and not skip[c] then return c end
+        if usable(c) then return c end
     end
 end
 
@@ -1980,7 +1999,7 @@ local function depositAll(myId)
             if not alive(myId) then break end
         end
 
-        setStatus(string.format("Menuju peti #%d", chest.number))
+        setStatus(string.format("Menuju peti #%d (giliran simpan)", chest.number))
         local tr, anc = goToChest(chest, myId)
         visited = true
         if anc then anchorIdx = anc end
@@ -1990,6 +2009,9 @@ local function depositAll(myId)
             setStatus(string.format("Peti #%d tidak terjangkau, coba peti lain", chest.number))
             continue
         end
+
+        -- peti ini dipakai: simpan berikutnya pindah ke peti setelahnya
+        lastStoreNo = chest.number
 
         -- 1) buka peti dulu, tunggu (default 3 detik)
         setStatus(string.format("Membuka peti #%d (%s), tunggu %ss", chest.number, config.openKey, tostring(config.openDelay)))
