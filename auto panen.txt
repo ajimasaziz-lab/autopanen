@@ -1,6 +1,7 @@
 --[[
     🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
-    - Titik Panen : player berjalan (WASD) ke titik, menekan tombol panen (F), lanjut
+    - Titik Panen : player berjalan (WASD) ke titik, lalu MENGKLIK tombol keranjang buah
+                    di layar (posisi diatur lewat "Atur Tombol Keranjang", tab Rute), lanjut
     - Titik Jalan : player hanya melewati titik
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
@@ -52,7 +53,6 @@ local config = {
     radius          = 3,
     stepTimeout     = 15,
     useWASD         = 1,
-    harvestKey      = "F",
     retryPerPoint   = 3,       -- berapa kali coba ulang satu titik (mundur lalu maju lagi)
     lookahead       = 5,       -- titik bidik di depan pada garis rute (stud)
     -- peti
@@ -83,6 +83,8 @@ local depositCooldown = 0
 local calib    = { slot = nil, step = nil, drop = nil }
 local calibStep = 0
 local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
+local harvestBtnPos = nil     -- Vector2 posisi layar tombol keranjang buah
+local harvestCalibOn = false  -- sedang menunggu klik untuk kalibrasi tombol keranjang
 
 ------------------------------------------------------------------
 -- HELPER UI
@@ -159,7 +161,7 @@ local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
 local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
-local ROUTE_CANVAS = 480
+local ROUTE_CANVAS = 508
 local CHEST_CANVAS = 516
 
 local gui = new("ScreenGui", {
@@ -327,7 +329,7 @@ local halfR = (WIN_W - PAD - RPAD - 6) / 2
 ------------------------------------------------------------------
 -- HALAMAN RUTE
 ------------------------------------------------------------------
-local btnAddE = makeButton(pageRoute, "📍 Titik Panen (F)", COLORS.green,
+local btnAddE = makeButton(pageRoute, "📍 Titik Panen", COLORS.green,
     UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfR, 0, 32))
 local btnAddWalk = makeButton(pageRoute, "🚶 Titik Jalan", COLORS.blue,
     UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 32))
@@ -348,9 +350,12 @@ addSetting(pageRoute, "Delay setelah panen (detik)",   "eDelay", 276, "num")
 addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
 addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
 addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
-addSetting(pageRoute, "Tombol panen",                  "harvestKey", 388, "text", 50, "F")
-addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 416, "int", 50)
-addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 444, "num", 50)
+local btnHarvestCalib = makeButton(pageRoute, "🧺 Atur Tombol Keranjang", COLORS.blue,
+    UDim2.new(0, PAD, 0, 388), UDim2.new(1, -PAD - RPAD, 0, 28))
+local harvestLabel = makeLabel(pageRoute, "Tombol keranjang: belum diatur", UDim2.new(0, PAD, 0, 418),
+    UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 11)
+addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 444, "int", 50)
+addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 472, "num", 50)
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -907,6 +912,7 @@ end
 
 btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
+    if harvestCalibOn then setStatus("Selesaikan pengaturan tombol keranjang dulu"); return end
     if calibStep > 0 then
         if calibStep == 3 then
             calib.step = nil
@@ -947,6 +953,54 @@ UIS.InputBegan:Connect(function(input)
     end
     updateCalibLabel()
 end)
+
+------------------------------------------------------------------
+-- KALIBRASI TOMBOL KERANJANG (posisi tombol panen di layar)
+------------------------------------------------------------------
+local function updateHarvestLabel()
+    if harvestBtnPos then
+        harvestLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
+        harvestLabel.Text = string.format("Tombol keranjang OK (%.0f, %.0f)", harvestBtnPos.X, harvestBtnPos.Y)
+    else
+        harvestLabel.TextColor3 = Color3.fromRGB(255, 170, 120)
+        harvestLabel.Text = "Tombol keranjang: belum diatur"
+    end
+end
+
+local function finishHarvestCalib(msg)
+    harvestCalibOn = false
+    btnHarvestCalib.Text = "🧺 Atur Tombol Keranjang"
+    btnHarvestCalib.BackgroundColor3 = COLORS.blue
+    updateHarvestLabel()
+    setStatus(msg)
+end
+
+btnHarvestCalib.MouseButton1Click:Connect(function()
+    if running then setStatus("Stop dulu sebelum atur tombol keranjang"); return end
+    if calibStep > 0 then setStatus("Selesaikan kalibrasi drag dulu"); return end
+    if harvestCalibOn then
+        finishHarvestCalib("Pengaturan tombol keranjang dibatalkan")
+        return
+    end
+    harvestCalibOn = true
+    btnHarvestCalib.Text = "⏹ Batalkan"
+    btnHarvestCalib.BackgroundColor3 = COLORS.orange
+    setStatus("Klik tombol KERANJANG BUAH di layar (di luar panel ini)")
+end)
+
+UIS.InputBegan:Connect(function(input)
+    if not harvestCalibOn then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+
+    local pos = inputPos(input)
+    if insideMain(pos) then return end -- klik di panel script diabaikan
+
+    harvestBtnPos = pos
+    finishHarvestCalib("Tombol keranjang tersimpan. Jangan taruh panel di atasnya")
+end)
+
+updateHarvestLabel()
 
 ------------------------------------------------------------------
 -- INVENTORY
@@ -1050,7 +1104,25 @@ local function keyFromName(name, default)
     return (ok and kc) or default
 end
 
-local function pressHarvest() pressKey(keyFromName(config.harvestKey, KC.F), 0.05) end
+-- klik satu titik di layar (dipakai untuk tombol keranjang buah)
+local function clickAt(pos)
+    pcall(function()
+        VIM:SendMouseMoveEvent(pos.X, pos.Y, game)
+        task.wait(0.05)
+        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+        task.wait(0.07)
+        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+    end)
+end
+
+-- panen = klik tombol keranjang buah di layar
+local function pressHarvest()
+    if harvestBtnPos then
+        clickAt(harvestBtnPos)
+        return true
+    end
+    return false
+end
 local function openKeyCode() return keyFromName(config.openKey, KC.F) end
 
 local function steerTo(root, target)
@@ -1423,7 +1495,17 @@ end
 local function startRun()
     if running then return end
     if calibStep > 0 then setStatus("Selesaikan kalibrasi dulu"); return end
+    if harvestCalibOn then setStatus("Selesaikan pengaturan tombol keranjang dulu"); return end
     if #points == 0 then setStatus("Tambahkan titik dulu!"); return end
+
+    local hasAction = false
+    for _, p in ipairs(points) do
+        if p.type == "action" then hasAction = true break end
+    end
+    if hasAction and not harvestBtnPos then
+        setStatus("Atur Tombol Keranjang dulu (tab Rute)")
+        return
+    end
 
     running = true
     runId += 1
@@ -1527,9 +1609,10 @@ btnClose.MouseButton1Click:Connect(function()
     running = false
     runId += 1
     calibStep = 0
+    harvestCalibOn = false
     releaseMoveKeys()
     for _, c in ipairs(chests) do removeMarker(c) end
     gui:Destroy()
 end)
 
-setStatus("Siap. Tambah titik, scan peti, kalibrasi drag, lalu Start")
+setStatus("Siap. Tambah titik, atur tombol keranjang, scan peti, kalibrasi drag, lalu Start")
