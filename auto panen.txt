@@ -4,6 +4,8 @@
                     (mode 2 = klik lewat TOMBOL BULAT melayang yang digeser ke tombol
                     panen di layar, lalu dikunci; mode 1 = tekan tombol F), lanjut
     - Titik Jalan : player hanya melewati titik
+    - Penghitung panen membaca teks notifikasi di layar ("Harvested ... xN"), bukan jumlah tombol ditekan
+    - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
     - Tas penuh -> jalan ke peti. Jika tersangkut di tengah jalan, karakter
@@ -54,6 +56,8 @@ local config = {
     eDelay          = 0.5,     -- jeda setelah panen selesai, sebelum ke titik berikutnya (detik)
     harvestMode     = 2,       -- 1 = tekan tombol F, 2 = klik lewat tombol bulat melayang
     harvestKey      = "F",     -- tombol panen (mode 1)
+    harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
+    countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
     stepTimeout     = 15,
     useWASD         = 1,
@@ -167,7 +171,7 @@ local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
 local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
-local ROUTE_CANVAS = 592
+local ROUTE_CANVAS = 644
 local CHEST_CANVAS = 516
 
 local gui = new("ScreenGui", {
@@ -370,6 +374,8 @@ addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 472, "num", 
 addSetting(pageRoute, "Tunggu sebelum panen (detik)",  "preHarvestDelay", 500, "num", 50)
 addSetting(pageRoute, "Cara panen (1=F, 2=bulat)", "harvestMode", 528, "int", 50)
 addSetting(pageRoute, "Tombol panen (mode 1)",         "harvestKey", 556, "text", 50, "F")
+addSetting(pageRoute, "Kata notifikasi panen",         "harvestNotif", 584, "text", 80, "harvested")
+addSetting(pageRoute, "Hitung angka xN (1=ya)",        "countAmount", 612, "int", 50)
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -1413,14 +1419,13 @@ local function travel(target, myId, radius, fromIdx)
     })
     if back == "stopped" or not alive(myId) then return "stopped" end
 
-    local fwd = (to - cur) % n
-    local bwd = (cur - to) % n
-    local step = (fwd <= bwd) and 1 or -1
-    local count = math.min(fwd, bwd)
+    -- rute bolak-balik (bukan melingkar): ikuti titik secara berurutan tanpa lompat dari N ke 1
+    local step = (to >= cur) and 1 or -1
+    local count = math.abs(to - cur)
 
     for hop = 0, count do
         if hop > 0 then
-            local nxt = (cur - 1 + step) % n + 1
+            local nxt = cur + step
             local w = walkRoute(points[cur].pos, points[nxt].pos, myId)
             if w == "stopped" then return "stopped" end
             cur = nxt
@@ -1553,6 +1558,54 @@ local function depositAll(myId)
 end
 
 ------------------------------------------------------------------
+-- PENGHITUNG PANEN: deteksi teks notifikasi "Harvested ... xN" di layar
+------------------------------------------------------------------
+local notifAdded = nil
+local lastCounted = {}                                -- [teks] = waktu terakhir dihitung
+local seenText = setmetatable({}, { __mode = "k" })   -- [label] = teks terakhir yang sudah dihitung
+
+local function parseHarvestAmount(text)
+    if config.countAmount ~= 1 then return 1 end
+    local n = text:match("%f[%a][xX]%s*(%d[%d,]*)")      -- "x3"
+        or text:match("(%d[%d,]*)%s*[xX]%f[%A]")         -- "3x"
+        or text:match("×%s*(%d[%d,]*)")                  -- "×3"
+        or text:match("(%d[%d,]*)%s*×")                  -- "3×"
+    if n then n = tonumber((n:gsub(",", ""))) end
+    return n or 1
+end
+
+local function checkNotif(label)
+    if not running or not gui.Parent then return end
+    if not label.Visible or label:IsDescendantOf(gui) then return end
+    local raw = label.Text
+    if raw == "" then return end
+    local text = raw:gsub("<[^>]+>", "")                 -- buang tag rich text
+    local kw = tostring(config.harvestNotif or ""):lower()
+    if kw == "" or not text:lower():find(kw, 1, true) then return end
+
+    if seenText[label] == raw then return end            -- teks yang sama di label yang sama
+    seenText[label] = raw
+    local now = os.clock()
+    if lastCounted[text] and now - lastCounted[text] < 0.25 then return end -- label ganda/bayangan
+    lastCounted[text] = now
+
+    stats.harvested += parseHarvestAmount(text)
+    updateStats()
+end
+
+local function watchLabel(l)
+    if not (l:IsA("TextLabel") or l:IsA("TextButton")) then return end
+    l:GetPropertyChangedSignal("Text"):Connect(function() checkNotif(l) end)
+    checkNotif(l) -- label baru yang sudah berisi teks
+end
+
+task.spawn(function()
+    local pg = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui")
+    notifAdded = pg.DescendantAdded:Connect(watchLabel)
+    for _, d in ipairs(pg:GetDescendants()) do watchLabel(d) end
+end)
+
+------------------------------------------------------------------
 -- START / STOP
 ------------------------------------------------------------------
 local function updateButtons()
@@ -1591,7 +1644,15 @@ local function startRun()
     task.spawn(function()
         local loopCount = 0
         while alive(myId) do
-            for i, pt in ipairs(points) do
+            -- urutan bolak-balik: 1..N lalu N-1..1 (contoh 1-2-3-4-5-6-5-4-3-2-1).
+            -- siklus berikutnya mulai dari titik 2 karena karakter sudah berada di titik 1.
+            local order = {}
+            local n = #points
+            for k = (loopCount == 0) and 1 or math.min(2, n), n do table.insert(order, k) end
+            for k = n - 1, 1, -1 do table.insert(order, k) end
+
+            for _, i in ipairs(order) do
+                local pt = points[i]
                 if not alive(myId) then break end
 
                 if config.autoStore and os.clock() >= depositCooldown and bagIsFull() then
@@ -1629,9 +1690,7 @@ local function startRun()
                         waitInterruptible(config.preHarvestDelay, myId)
                         if not alive(myId) then break end
                         pressHarvest()
-                        stats.harvested += 1
-                        updateStats()
-                        setStatus(string.format("Loop %d | Panen ke-%d (titik %d)", loopCount + 1, stats.harvested, i))
+                        setStatus(string.format("Loop %d | Panen dijalankan (titik %d)", loopCount + 1, i))
                         waitInterruptible(config.eDelay, myId)
                     end
                 else
@@ -1685,6 +1744,7 @@ btnClose.MouseButton1Click:Connect(function()
     running = false
     runId += 1
     calibStep = 0
+    if notifAdded then notifAdded:Disconnect() end
     releaseMoveKeys()
     for _, c in ipairs(chests) do removeMarker(c) end
     gui:Destroy()
