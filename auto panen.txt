@@ -5,22 +5,20 @@
                     panen di layar, lalu dikunci; mode 1 = tekan tombol F), lanjut
     - Titik Jalan : player hanya melewati titik
     - Auto simpan berjalan berkala: tiap N menit (pengaturan "Simpan otomatis tiap", tab Peti)
-    - Penghitung panen membaca teks notifikasi di layar ("Harvested ... xN"), bukan jumlah tombol ditekan
-    - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
+    - Penghitung panen membaca teks notifikasi di layar ("Harvested ... xN")
+    - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
-      Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
+    - MENUJU PETI: karakter mengikuti titik-titik rute dulu sampai titik rute terdekat
+      dengan peti, baru menghitung rute (Pathfinding) & mendekati peti. Langkahnya dicatat.
+    - SELESAI SIMPAN: karakter mundur lewat jejak yang tadi dilalui, lalu MASUK KE TITIK
+      RUTE TERDEKAT dulu, baru lanjut panen menyusuri jalur (tidak memotong lurus).
+    - Awal Start / posisi di luar jalur: masuk titik rute terdekat dulu.
     - Auto simpan: buka peti (tunggu 3 detik) lalu ulangi siklus 4 titik kalibrasi:
         titik 1 = tekan & tahan item, seret ke titik 2 (area peti, sisi kiri),
-        tunggu 1 detik sampai tombol konfirmasi muncul, klik titik 3 (Confirm),
+        tunggu sebentar sampai tombol konfirmasi muncul, klik titik 3 (Confirm),
         lalu klik titik 4 (tombol Sort) agar item berikutnya naik ke slot pertama.
-      Di langkah 3 kalibrasi skrip menyeret 1 item otomatis agar Confirm muncul;
-      jika belum muncul tekan "Seret lagi" di banner.
-    - Waktu simpan tiba -> HITUNG RUTE dulu (Pathfinding, 8 titik berdiri di sekeliling peti,
-      pilih yang valid & terpendek), baru jalan ke peti. Jika tersangkut di tengah jalan, karakter
-      kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
-      lalu mencoba mendekati peti lagi dari titik rute tersebut.
     - Scan peti: nama default "trunk, chest" (otomatis kena "Mimic Chest").
-      Tombol "Cek Objek Sekitar" membantu mencari nama chest yang belum diketahui.
+    - Tombol "Pilih Rute" (tab Rute): window minimize, tampil tombol Titik Panen, Titik Jalan, dan Selesai.
     - Perlu KALIBRASI DRAG sekali (tab Peti)
 ]]
 
@@ -65,10 +63,10 @@ local config = {
     eDelay          = 0.5,     -- jeda setelah panen selesai, sebelum ke titik berikutnya (detik)
     harvestMode     = 2,       -- 1 = tekan tombol F, 2 = klik lewat tombol bulat melayang
     harvestKey      = "F",     -- tombol panen (mode 1)
-    harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
+    harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung
     chestFullNotif  = "chest full, trunk full, storage full",                    -- notifikasi peti penuh
-    confirmDelay    = 1,       -- tunggu setelah item diseret sebelum klik Confirm (detik)
-    sortDelay       = 0.6,     -- jeda setelah klik Confirm sebelum klik Sort (detik)
+    confirmDelay    = 0.3,     -- tunggu setelah item diseret sebelum klik Confirm (detik)
+    sortDelay       = 0.3,     -- jeda setelah klik Confirm sebelum klik Sort (detik)
     dragTotal       = 20,      -- jumlah seretan per kunjungan jika isi tas tidak bisa dihitung
     countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
@@ -82,14 +80,14 @@ local config = {
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
-    chestDist       = 2,
+    chestDist       = 2,       -- jarak berdiri dari peti saat membuka (stud, dari sisi peti)
     usePathfind     = 1,       -- 1 = hitung rute dulu (Pathfinding) sebelum menuju peti
     stuckLimit      = 3,       -- detik tanpa gerak sebelum dianggap tersangkut (menuju peti)
     materialKeywords = "",
     keepKeywords    = "",
-    depositDelay    = 0.3,
+    depositDelay    = 0.3,     -- jeda setelah klik Sort (detik)
     openKey         = "F",
-    openDelay       = 2,       -- tunggu setelah menekan tombol buka peti (detik)
+    openDelay       = 3,       -- tunggu setelah menekan tombol buka peti (detik)
     closeChest      = 0,
 }
 
@@ -116,6 +114,8 @@ local calibIgnore = false         -- abaikan klik saat skrip menyeret item sendi
 local calibTriggerDrag = nil      -- diisi setelah dragMouse didefinisikan
 local calibWasMin = false      -- status minimize sebelum kalibrasi dimulai
 local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
+local trail = {}             -- jejak langkah saat mendekati peti (untuk jalan pulang)
+local trailOn = false        -- true = driveTo mencatat jejak
 
 ------------------------------------------------------------------
 -- HELPER UI
@@ -192,7 +192,7 @@ local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
 local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
-local ROUTE_CANVAS = 644
+local ROUTE_CANVAS = 678
 local CHEST_CANVAS = 688
 
 local gui = new("ScreenGui", {
@@ -407,38 +407,41 @@ local btnAddE = makeButton(pageRoute, "📍 Titik Panen", COLORS.green,
 local btnAddWalk = makeButton(pageRoute, "🚶 Titik Jalan", COLORS.blue,
     UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 32))
 
-local coordLabel = makeLabel(pageRoute, "Posisi: -", UDim2.new(0, PAD, 0, 44),
+local btnPickRoute = makeButton(pageRoute, "🧭 Pilih Rute", COLORS.orange,
+    UDim2.new(0, PAD, 0, 44), UDim2.new(1, -PAD - RPAD, 0, 28))
+
+local coordLabel = makeLabel(pageRoute, "Posisi: -", UDim2.new(0, PAD, 0, 78),
     UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 11)
 
-local listFrame = makeList(pageRoute, 68, 110)
+local listFrame = makeList(pageRoute, 102, 110)
 
 local btnUndo = makeButton(pageRoute, "↶ Hapus Terakhir", COLORS.orange,
-    UDim2.new(0, PAD, 0, 184), UDim2.new(0, halfR, 0, 28))
+    UDim2.new(0, PAD, 0, 218), UDim2.new(0, halfR, 0, 28))
 local btnClear = makeButton(pageRoute, "🗑 Hapus Semua", COLORS.grey,
-    UDim2.new(0, PAD + halfR + 6, 0, 184), UDim2.new(0, halfR, 0, 28))
+    UDim2.new(0, PAD + halfR + 6, 0, 218), UDim2.new(0, halfR, 0, 28))
 
-addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 220, "int")
-addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 248, "num")
-addSetting(pageRoute, "Delay setelah panen (detik)",   "eDelay", 276, "num")
-addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
-addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
-addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
+addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 254, "int")
+addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 282, "num")
+addSetting(pageRoute, "Delay setelah panen (detik)",   "eDelay", 310, "num")
+addSetting(pageRoute, "Radius titik (stud)",           "radius", 338, "num")
+addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 366, "num")
+addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 394, "int", 50)
 local btnMarkerShow = makeButton(pageRoute, "👁 Tombol: Tampil", COLORS.green,
-    UDim2.new(0, PAD, 0, 388), UDim2.new(0, halfR, 0, 28))
+    UDim2.new(0, PAD, 0, 422), UDim2.new(0, halfR, 0, 28))
 local btnMarkerLock = makeButton(pageRoute, "🔓 Posisi: Terbuka", COLORS.blue,
-    UDim2.new(0, PAD + halfR + 6, 0, 388), UDim2.new(0, halfR, 0, 28))
+    UDim2.new(0, PAD + halfR + 6, 0, 422), UDim2.new(0, halfR, 0, 28))
 btnMarkerShow.TextSize = 11
 btnMarkerLock.TextSize = 11
-local markerLabel = makeLabel(pageRoute, "Seret tombol bulat ke tombol panen, lalu kunci", UDim2.new(0, PAD, 0, 418),
+local markerLabel = makeLabel(pageRoute, "Seret tombol bulat ke tombol panen, lalu kunci", UDim2.new(0, PAD, 0, 452),
     UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 200, 120), 11)
 markerLabel.TextTruncate = Enum.TextTruncate.AtEnd
-addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 444, "int", 50)
-addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 472, "num", 50)
-addSetting(pageRoute, "Tunggu sebelum panen (detik)",  "preHarvestDelay", 500, "num", 50)
-addSetting(pageRoute, "Cara panen (1=F, 2=bulat)", "harvestMode", 528, "int", 50)
-addSetting(pageRoute, "Tombol panen (mode 1)",         "harvestKey", 556, "text", 50, "F")
-addSetting(pageRoute, "Kata notifikasi panen",         "harvestNotif", 584, "text", 80, "harvested")
-addSetting(pageRoute, "Hitung angka xN (1=ya)",        "countAmount", 612, "int", 50)
+addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 478, "int", 50)
+addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 506, "num", 50)
+addSetting(pageRoute, "Tunggu sebelum panen (detik)",  "preHarvestDelay", 534, "num", 50)
+addSetting(pageRoute, "Cara panen (1=F, 2=bulat)", "harvestMode", 562, "int", 50)
+addSetting(pageRoute, "Tombol panen (mode 1)",         "harvestKey", 590, "text", 50, "F")
+addSetting(pageRoute, "Kata notifikasi panen",         "harvestNotif", 618, "text", 80, "harvested")
+addSetting(pageRoute, "Hitung angka xN (1=ya)",        "countAmount", 646, "int", 50)
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -621,6 +624,94 @@ end
 btnAddE.MouseButton1Click:Connect(function() addPoint("action") end)
 btnAddWalk.MouseButton1Click:Connect(function() addPoint("walk") end)
 
+------------------------------------------------------------------
+-- PILIH RUTE (window minimize, tampil 2 tombol titik + tombol Selesai)
+------------------------------------------------------------------
+local picking = false
+local pickWasMin = false
+local PICK_H = 40
+
+local pickPanel = new("Frame", {
+    Name = "PickPanel",
+    Size = UDim2.new(0, WIN_W, 0, PICK_H),
+    BackgroundColor3 = COLORS.bar,
+    BorderSizePixel = 0,
+    Visible = false,
+    ZIndex = 20,
+}, gui)
+corner(pickPanel, 10)
+new("UIStroke", { Color = COLORS.orange, Thickness = 1.5 }, pickPanel)
+
+local btnPickPanen = makeButton(pickPanel, "📍 Titik Panen", COLORS.green,
+    UDim2.new(0, 6, 0.5, 0), UDim2.new(0, 100, 0, 28), Vector2.new(0, 0.5))
+local btnPickJalan = makeButton(pickPanel, "🚶 Titik Jalan", COLORS.blue,
+    UDim2.new(0, 110, 0.5, 0), UDim2.new(0, 100, 0, 28), Vector2.new(0, 0.5))
+local btnPickDone = makeButton(pickPanel, "✓ Selesai", COLORS.red,
+    UDim2.new(1, -6, 0.5, 0), UDim2.new(0, 84, 0, 28), Vector2.new(1, 0.5))
+for _, b in ipairs({ btnPickPanen, btnPickJalan, btnPickDone }) do
+    b.TextSize = 11
+    b.ZIndex = 21
+end
+
+local function placePick()
+    local p, s = main.AbsolutePosition, main.AbsoluteSize
+    local cam = workspace.CurrentCamera
+    local vpH = cam and cam.ViewportSize.Y or 700
+    local y = p.Y + s.Y + 4
+    if y + PICK_H > vpH then y = math.max(0, p.Y - PICK_H - 4) end
+    pickPanel.Position = UDim2.fromOffset(p.X, y)
+end
+main:GetPropertyChangedSignal("AbsolutePosition"):Connect(placePick)
+main:GetPropertyChangedSignal("AbsoluteSize"):Connect(placePick)
+placePick()
+
+-- jumlah titik tampil di tombol supaya terlihat walau window minimize
+local function updatePickLabels()
+    local a, w = 0, 0
+    for _, pt in ipairs(points) do
+        if pt.type == "action" then a += 1 else w += 1 end
+    end
+    btnPickPanen.Text = string.format("📍 Panen (%d)", a)
+    btnPickJalan.Text = string.format("🚶 Jalan (%d)", w)
+end
+
+local function endPickRoute()
+    if not picking then return end
+    picking = false
+    pickPanel.Visible = false
+    btnPickRoute.Text = "🧭 Pilih Rute"
+    btnPickRoute.BackgroundColor3 = COLORS.orange
+    if setMinimized and not pickWasMin then setMinimized(false) end -- window kembali seperti semula
+    setStatus(string.format("Pilih rute selesai (%d titik)", #points))
+end
+
+local function startPickRoute()
+    if running then setStatus("Stop dulu sebelum memilih rute"); return end
+    if calibStep > 0 then setStatus("Selesaikan kalibrasi dulu"); return end
+    picking = true
+    pickWasMin = minimized
+    btnPickRoute.Text = "✓ Selesai Pilih Rute"
+    btnPickRoute.BackgroundColor3 = COLORS.red
+    updatePickLabels()
+    if setMinimized then setMinimized(true) end
+    pickPanel.Visible = true
+    placePick()
+    setStatus("Pilih rute: berdiri di lokasi, tekan tombol titik, lalu Selesai")
+end
+
+btnPickRoute.MouseButton1Click:Connect(function()
+    if picking then endPickRoute() else startPickRoute() end
+end)
+btnPickPanen.MouseButton1Click:Connect(function()
+    addPoint("action")
+    updatePickLabels()
+end)
+btnPickJalan.MouseButton1Click:Connect(function()
+    addPoint("walk")
+    updatePickLabels()
+end)
+btnPickDone.MouseButton1Click:Connect(endPickRoute)
+
 btnUndo.MouseButton1Click:Connect(function()
     if running then return end
     table.remove(points)
@@ -716,11 +807,12 @@ local function chestPos(chest)
     return chest.part.Position
 end
 
+-- jarak berdiri dari PUSAT peti = setengah ukuran peti + config.chestDist (jarak dari sisi peti)
 local function chestStandDist(chest)
     local _, size = boundsOf(chest.inst)
-    local d = math.max(2, config.chestDist)
+    local d = math.max(1, config.chestDist)
     if size then
-        d = math.max(d, math.max(size.X, size.Z) / 2 + 2)
+        d = math.max(size.X, size.Z) / 2 + d
     end
     return d
 end
@@ -1066,6 +1158,7 @@ end)
 
 btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
+    if picking then endPickRoute() end
     if calibStep > 0 then
         if calibStep == 3 then
             calib.confirm = nil
@@ -1395,7 +1488,7 @@ end
 local function waitInterruptible(seconds, myId)
     local t = os.clock()
     while alive(myId) and os.clock() - t < seconds do
-        task.wait(0.1)
+        task.wait(0.05)
     end
 end
 
@@ -1407,9 +1500,7 @@ end
     opts.radius     : jarak dianggap sampai
     opts.timeout    : batas waktu (detik)
     opts.stuckLimit : jika diisi, return "stuck" setelah sekian detik tanpa gerak
-                      (jika kosong: hanya lompat & terus mencoba sampai timeout)
     opts.line       : {a, b} -> karakter dipaksa mengikuti GARIS a->b
-                      (membidik titik di depan pada garis, jadi tidak melenceng)
     Return: "reached" | "stuck" | "timeout" | "stopped"
 ]]
 local function driveTo(target, myId, opts)
@@ -1428,6 +1519,14 @@ local function driveTo(target, myId, opts)
         local _, hum, root = getChar()
         if not root then result = "stopped" break end
         local pos = root.Position
+
+        -- catat jejak tiap ~4 stud (dipakai untuk kembali dari peti lewat jalan yang sama)
+        if trailOn then
+            local last = trail[#trail]
+            if not last or flatDist(last, pos) >= 4 then
+                table.insert(trail, pos)
+            end
+        end
 
         if flatDist(pos, target) <= radius and math.abs(pos.Y - target.Y) < 12 then
             result = "reached"
@@ -1521,11 +1620,10 @@ local function nearestIdx(pos)
 end
 
 --[[
-    travel: menuju target (peti / kembali ke rute) secara langsung.
+    travel: menuju target secara langsung.
     Jika tersangkut -> kembali ke jalur panen, ikuti titik-titik rute menuju
     titik rute terdekat dengan target, dan setelah tiap titik coba lagi
     mendekati target dari situ.
-    fromIdx: titik rute awal untuk fallback (default: terdekat dengan karakter)
     Return: "reached" | "failed" | "stopped"
 ]]
 local function travel(target, myId, radius, fromIdx)
@@ -1554,7 +1652,7 @@ local function travel(target, myId, radius, fromIdx)
     })
     if back == "stopped" or not alive(myId) then return "stopped" end
 
-    -- rute bolak-balik (bukan melingkar): ikuti titik secara berurutan tanpa lompat dari N ke 1
+    -- rute bolak-balik: ikuti titik secara berurutan tanpa lompat dari N ke 1
     local step = (to >= cur) and 1 or -1
     local count = math.abs(to - cur)
 
@@ -1577,6 +1675,23 @@ local function travel(target, myId, radius, fromIdx)
         if bk == "stopped" or not alive(myId) then return "stopped" end
     end
     return "failed"
+end
+
+-- Berjalan menyusuri jalur dari titik rute indeks a ke indeks b, titik demi titik
+-- (setiap ruas lewat garis rute, tidak memotong lurus). Return "reached" | "failed" | "stopped"
+local function walkAlongRoute(a, b, myId)
+    if a == b then return "reached" end
+    local step = (b > a) and 1 or -1
+    local cur = a
+    while cur ~= b do
+        local nxt = cur + step
+        setStatus(string.format("Mengikuti jalur: titik %d -> %d", cur, nxt))
+        local r = walkRoute(points[cur].pos, points[nxt].pos, myId)
+        if r ~= "reached" then return r end
+        cur = nxt
+        routeIdx = cur
+    end
+    return "reached"
 end
 
 ------------------------------------------------------------------
@@ -1726,6 +1841,105 @@ local function transferOnce(myId, label)
     waitInterruptible(config.depositDelay, myId)
 end
 
+-- Masuk ke titik rute TERDEKAT (maks 3 kandidat), lalu set routeIdx ke titik itu.
+local function enterNearestRoute(myId, fallbackIdx)
+    if #points == 0 then return false end
+    local _, _, root = getChar()
+    if not root then return false end
+
+    local cand = {}
+    for idx, pt in ipairs(points) do
+        table.insert(cand, { idx = idx, d = flatDist(pt.pos, root.Position) })
+    end
+    table.sort(cand, function(a, b) return a.d < b.d end)
+
+    for k = 1, math.min(3, #cand) do
+        local idx = cand[k].idx
+        setStatus(string.format("Masuk ke titik jalan terdekat (%d)", idx))
+        local r = smartTravel({ points[idx].pos }, points[idx].pos, myId, config.radius + 1, idx)
+        if not alive(myId) then return false end
+        if r == "reached" then
+            routeIdx = idx
+            highlight(idx)
+            return true
+        end
+    end
+
+    if fallbackIdx and points[fallbackIdx] then
+        setStatus("Kembali ke titik rute terakhir...")
+        local r = smartTravel({ points[fallbackIdx].pos }, points[fallbackIdx].pos, myId, config.radius + 1, fallbackIdx)
+        if r == "reached" then
+            routeIdx = fallbackIdx
+            highlight(fallbackIdx)
+            return true
+        end
+    end
+    return false
+end
+
+-- Kembali dari peti lewat jejak yang tadi dilalui (jalan yang pasti bisa dilewati)
+local function retraceTrail(myId)
+    if #trail == 0 then return end
+    setStatus("Kembali lewat jejak yang tadi dilalui...")
+    for i = #trail, 1, -1 do
+        if not alive(myId) then return end
+        local r = driveTo(trail[i], myId, {
+            radius = 3, timeout = 6, stuckLimit = 3, keepKeys = (i > 1),
+        })
+        if r == "stopped" then return end
+    end
+    trail = {}
+end
+
+-- Setelah selesai di peti: mundur lewat jejak -> masuk titik rute terdekat -> lanjut panen
+local function returnToRoute(myId, fallbackPos, anchorIdx)
+    trailOn = false
+    if #points == 0 then
+        if fallbackPos then
+            setStatus("Kembali ke posisi awal...")
+            smartTravel({ fallbackPos }, fallbackPos, myId, config.radius + 1, nil)
+        end
+        return
+    end
+    retraceTrail(myId)
+    if not alive(myId) then return end
+    enterNearestRoute(myId, anchorIdx)
+end
+
+-- Menuju peti: ikuti jalur rute sampai titik terdekat peti, baru dekati peti.
+-- Return: hasil, titikRuteAcuan
+local function goToChest(chest, myId)
+    local target = chestPos(chest)
+    local anchor
+
+    if #points > 0 then
+        local _, _, root = getChar()
+        if not root then return "stopped", nil end
+
+        -- belum di jalur? masuk titik rute terdekat dulu
+        if not (routeIdx and points[routeIdx])
+            or flatDist(root.Position, points[routeIdx].pos) > 15 then
+            enterNearestRoute(myId, nil)
+            if not alive(myId) then return "stopped", nil end
+        end
+
+        if routeIdx and points[routeIdx] then
+            local to = nearestIdx(target)
+            setStatus(string.format("Menuju peti lewat jalur rute (titik %d -> %d)", routeIdx, to))
+            local w = walkAlongRoute(routeIdx, to, myId)
+            if w == "stopped" or not alive(myId) then return "stopped", nil end
+            if w == "reached" then anchor = to end
+        end
+    end
+
+    -- dari titik rute terdekat, dekati peti (jejak dicatat untuk jalan pulang)
+    trail = {}
+    trailOn = true
+    local r = smartTravel(chestGoals(chest), target, myId, chestStandDist(chest), anchor)
+    trailOn = false
+    return r, anchor
+end
+
 -- Return: "ok", "allfull", "unreachable", "nochest", "nocalib", "stopped"
 local function depositAll(myId)
     local char, hum, root = getChar()
@@ -1742,7 +1956,8 @@ local function depositAll(myId)
     if #chests == 0 then return "nochest" end
 
     local returnPos = root.Position
-    local leftIdx = routeIdx
+    local anchorIdx = routeIdx
+    local visited = false
     local skipTool = char:FindFirstChildOfClass("Tool")
     local result = "ok"
     local deposited = 0
@@ -1759,8 +1974,16 @@ local function depositAll(myId)
             break
         end
 
+        -- kalau sebelumnya sudah dari peti lain, kembali ke jalur dulu
+        if visited then
+            returnToRoute(myId, nil, anchorIdx)
+            if not alive(myId) then break end
+        end
+
         setStatus(string.format("Menuju peti #%d", chest.number))
-        local tr = smartTravel(chestGoals(chest), chestPos(chest), myId, chestStandDist(chest), leftIdx)
+        local tr, anc = goToChest(chest, myId)
+        visited = true
+        if anc then anchorIdx = anc end
         if not alive(myId) then break end
         if tr ~= "reached" then
             skip[chest] = true
@@ -1831,11 +2054,9 @@ local function depositAll(myId)
         end
     end
 
-    -- kembali ke jalur panen (titik rute terakhir), mengikuti rute bila tersangkut
+    -- kembali ke jalur panen: mundur lewat jejak, lalu masuk titik rute terdekat
     if alive(myId) then
-        setStatus("Kembali ke jalur panen...")
-        local dest = (leftIdx and points[leftIdx]) and points[leftIdx].pos or returnPos
-        smartTravel({ dest }, dest, myId, config.radius + 1, nil)
+        returnToRoute(myId, returnPos, anchorIdx)
     end
 
     if not alive(myId) then return "stopped" end
@@ -1942,6 +2163,7 @@ local function stopRun(msg)
     stats.runStart = nil
     running = false
     runId += 1
+    trailOn = false
     releaseMoveKeys()
     local _, hum, root = getChar()
     if hum and root then hum:MoveTo(root.Position) end
@@ -1954,6 +2176,7 @@ local function startRun()
     if running then return end
     if calibStep > 0 then setStatus("Selesaikan kalibrasi dulu"); return end
     if #points == 0 then setStatus("Tambahkan titik dulu!"); return end
+    if picking then endPickRoute() end
 
     running = true
     runId += 1
@@ -2002,10 +2225,16 @@ local function startRun()
 
                 -- MODE PANEN: hanya lewat garis rute (titik sebelumnya -> titik ini)
                 local r
+                -- belum di jalur (awal Start / setelah simpan gagal kembali): masuk titik jalan terdekat dulu
+                if not (routeIdx and points[routeIdx]) then
+                    setStatus("Masuk ke titik jalan terdekat dulu...")
+                    enterNearestRoute(myId, nil)
+                    if not alive(myId) then break end
+                end
                 if routeIdx and points[routeIdx] then
-                    r = walkRoute(points[routeIdx].pos, pt.pos, myId)
+                    r = walkAlongRoute(routeIdx, i, myId)
                 else
-                    r = travel(pt.pos, myId, config.radius) -- awal: belum ada titik acuan
+                    r = travel(pt.pos, myId, config.radius) -- cadangan terakhir
                 end
                 if not alive(myId) then break end
 
@@ -2056,6 +2285,7 @@ btnStoreNow.MouseButton1Click:Connect(function()
     running = true
     runId += 1
     local myId = runId
+    routeIdx = nil
     updateButtons()
     task.spawn(function()
         local res = depositAll(myId)
@@ -2098,6 +2328,7 @@ btnClose.MouseButton1Click:Connect(function()
     running = false
     runId += 1
     calibStep = 0
+    trailOn = false
     if notifAdded then notifAdded:Disconnect() end
     releaseMoveKeys()
     for _, c in ipairs(chests) do removeMarker(c) end
