@@ -9,6 +9,7 @@
       * lanjut ke peti berikutnya sesuai nomor
     - Tombol Reset Panen dan Reset Peti
     - Perlu KALIBRASI DRAG sekali (tab Peti)
+    - Window kecil + bisa di-scroll
 ]]
 
 local Players      = game:GetService("Players")
@@ -111,7 +112,7 @@ local function makeButton(parent, text, color, pos, size, anchor)
     local b = new("TextButton", {
         Text = text,
         Font = Enum.Font.GothamBold,
-        TextSize = 13,
+        TextSize = 12,
         TextColor3 = COLORS.text,
         BackgroundColor3 = color,
         AutoButtonColor = true,
@@ -128,7 +129,7 @@ local function makeLabel(parent, text, pos, size, align, color, textSize)
     return new("TextLabel", {
         Text = text,
         Font = Enum.Font.Gotham,
-        TextSize = textSize or 13,
+        TextSize = textSize or 12,
         TextColor3 = color or COLORS.text,
         TextXAlignment = align or Enum.TextXAlignment.Left,
         BackgroundTransparency = 1,
@@ -138,18 +139,25 @@ local function makeLabel(parent, text, pos, size, align, color, textSize)
 end
 
 ------------------------------------------------------------------
--- WINDOW
+-- WINDOW (kecil + scroll)
 ------------------------------------------------------------------
-local WIN_W   = 340
-local TITLE_H = 44
-local STRIP_H = 26
+local camera = workspace.CurrentCamera
+local vpY = camera and camera.ViewportSize.Y or 700
+
+local WIN_W   = 310
+local TITLE_H = 40
+local STRIP_H = 24
 local TAB_H   = 34
-local PAGE_H  = 440
+local VIEW_H  = math.clamp(math.floor(vpY * 0.4), 150, 250) -- tinggi area scroll
 local FOOT_H  = 62
-local CONTENT_H = TAB_H + PAGE_H + FOOT_H
+local CONTENT_H = TAB_H + VIEW_H + FOOT_H
 local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
-local PAD     = 12
+local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
+
+-- tinggi isi tiap halaman (yang di-scroll)
+local ROUTE_CANVAS = 372
+local CHEST_CANVAS = 436
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -178,19 +186,19 @@ local titleBar = new("Frame", {
 corner(titleBar, 12)
 
 local titleLabel = makeLabel(titleBar, "🌾 Auto Panen",
-    UDim2.new(0, 12, 0, 0), UDim2.new(0, 120, 1, 0), Enum.TextXAlignment.Left, COLORS.text, 15)
+    UDim2.new(0, 10, 0, 0), UDim2.new(0, 110, 1, 0), Enum.TextXAlignment.Left, COLORS.text, 14)
 titleLabel.Font = Enum.Font.GothamBold
 
 local btnClose = makeButton(titleBar, "✕", COLORS.red,
-    UDim2.new(1, -8, 0.5, 0), UDim2.new(0, 26, 0, 26), Vector2.new(1, 0.5))
+    UDim2.new(1, -8, 0.5, 0), UDim2.new(0, 24, 0, 24), Vector2.new(1, 0.5))
 local btnMin = makeButton(titleBar, "–", COLORS.grey,
-    UDim2.new(1, -40, 0.5, 0), UDim2.new(0, 26, 0, 26), Vector2.new(1, 0.5))
+    UDim2.new(1, -38, 0.5, 0), UDim2.new(0, 24, 0, 24), Vector2.new(1, 0.5))
 local btnStop = makeButton(titleBar, "■ Stop", COLORS.red,
-    UDim2.new(1, -72, 0.5, 0), UDim2.new(0, 54, 0, 26), Vector2.new(1, 0.5))
+    UDim2.new(1, -68, 0.5, 0), UDim2.new(0, 52, 0, 24), Vector2.new(1, 0.5))
 local btnStart = makeButton(titleBar, "▶ Start", COLORS.green,
-    UDim2.new(1, -132, 0.5, 0), UDim2.new(0, 54, 0, 26), Vector2.new(1, 0.5))
-btnStop.TextSize = 12
-btnStart.TextSize = 12
+    UDim2.new(1, -126, 0.5, 0), UDim2.new(0, 52, 0, 24), Vector2.new(1, 0.5))
+btnStop.TextSize = 11
+btnStart.TextSize = 11
 
 local statsStrip = new("Frame", {
     Name = "StatsStrip",
@@ -200,8 +208,8 @@ local statsStrip = new("Frame", {
     BorderSizePixel = 0,
 }, main)
 
-local statsLabel = makeLabel(statsStrip, "🌱 Panen: 0   |   🔁 Loop: 0   |   ⏱ 00:00",
-    UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 1, 0), Enum.TextXAlignment.Center, Color3.fromRGB(150, 230, 170), 13)
+local statsLabel = makeLabel(statsStrip, "🌱 Panen: 0  |  🔁 Loop: 0  |  ⏱ 00:00",
+    UDim2.new(0, 0, 0, 0), UDim2.new(1, 0, 1, 0), Enum.TextXAlignment.Center, Color3.fromRGB(150, 230, 170), 12)
 statsLabel.Font = Enum.Font.GothamBold
 
 local content = new("Frame", {
@@ -216,18 +224,22 @@ local tabRoute = makeButton(content, "🗺 Rute", COLORS.blue,
 local tabChest = makeButton(content, "📦 Peti", COLORS.grey,
     UDim2.new(0, PAD * 2 + halfW, 0, 4), UDim2.new(0, halfW, 0, 26))
 
-local pageRoute = new("Frame", {
-    Position = UDim2.new(0, 0, 0, TAB_H),
-    Size = UDim2.new(1, 0, 0, PAGE_H),
-    BackgroundTransparency = 1,
-}, content)
+local function makePage(canvasH, visible)
+    return new("ScrollingFrame", {
+        Position = UDim2.new(0, 0, 0, TAB_H),
+        Size = UDim2.new(1, 0, 0, VIEW_H),
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ScrollBarThickness = 4,
+        ScrollBarImageColor3 = COLORS.sub,
+        ScrollingDirection = Enum.ScrollingDirection.Y,
+        CanvasSize = UDim2.new(0, 0, 0, canvasH),
+        Visible = visible,
+    }, content)
+end
 
-local pageChest = new("Frame", {
-    Position = UDim2.new(0, 0, 0, TAB_H),
-    Size = UDim2.new(1, 0, 0, PAGE_H),
-    BackgroundTransparency = 1,
-    Visible = false,
-}, content)
+local pageRoute = makePage(ROUTE_CANVAS, true)
+local pageChest = makePage(CHEST_CANVAS, false)
 
 local function showTab(name)
     pageRoute.Visible = (name == "route")
@@ -239,7 +251,7 @@ tabRoute.MouseButton1Click:Connect(function() showTab("route") end)
 tabChest.MouseButton1Click:Connect(function() showTab("chest") end)
 
 local footer = new("Frame", {
-    Position = UDim2.new(0, 0, 0, TAB_H + PAGE_H),
+    Position = UDim2.new(0, 0, 0, TAB_H + VIEW_H),
     Size = UDim2.new(1, 0, 0, FOOT_H),
     BackgroundTransparency = 1,
 }, content)
@@ -250,25 +262,29 @@ local btnResetChest = makeButton(footer, "♻ Reset Peti", COLORS.orange,
     UDim2.new(0, PAD * 2 + halfW, 0, 4), UDim2.new(0, halfW, 0, 28))
 
 local statusLabel = makeLabel(footer, "Status: Siap", UDim2.new(0, PAD, 0, 36),
-    UDim2.new(1, -PAD * 2, 0, 22), Enum.TextXAlignment.Left, COLORS.sub, 12)
+    UDim2.new(1, -PAD * 2, 0, 22), Enum.TextXAlignment.Left, COLORS.sub, 11)
 statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
 
+-- margin kanan 6 ekstra agar tidak tertutup scrollbar
+local RPAD = PAD + 6
+
 local function addSetting(parent, labelText, key, y, kind, boxW, placeholder)
-    boxW = boxW or 70
-    makeLabel(parent, labelText, UDim2.new(0, PAD, 0, y),
-        UDim2.new(1, -PAD * 2 - boxW - 6, 0, 24), Enum.TextXAlignment.Left, COLORS.text, 12)
+    boxW = boxW or 64
+    local lbl = makeLabel(parent, labelText, UDim2.new(0, PAD, 0, y),
+        UDim2.new(1, -PAD - RPAD - boxW - 4, 0, 24), Enum.TextXAlignment.Left, COLORS.text, 11)
+    lbl.TextTruncate = Enum.TextTruncate.AtEnd
     local box = new("TextBox", {
         Text = tostring(config[key]),
         PlaceholderText = placeholder or "",
         PlaceholderColor3 = COLORS.sub,
         Font = Enum.Font.GothamBold,
-        TextSize = 12,
+        TextSize = 11,
         TextColor3 = COLORS.text,
         BackgroundColor3 = COLORS.panel,
         BorderSizePixel = 0,
         ClearTextOnFocus = false,
         ClipsDescendants = true,
-        Position = UDim2.new(1, -PAD, 0, y),
+        Position = UDim2.new(1, -RPAD, 0, y),
         AnchorPoint = Vector2.new(1, 0),
         Size = UDim2.new(0, boxW, 0, 24),
     }, parent)
@@ -290,7 +306,7 @@ end
 local function makeList(parent, y, h)
     local list = new("ScrollingFrame", {
         Position = UDim2.new(0, PAD, 0, y),
-        Size = UDim2.new(1, -PAD * 2, 0, h),
+        Size = UDim2.new(1, -PAD - RPAD, 0, h),
         BackgroundColor3 = COLORS.panel,
         BorderSizePixel = 0,
         ScrollBarThickness = 4,
@@ -304,58 +320,60 @@ local function makeList(parent, y, h)
     return list
 end
 
+local halfR = (WIN_W - PAD - RPAD - 6) / 2 -- lebar setengah untuk tombol di dalam area scroll
+
 ------------------------------------------------------------------
 -- HALAMAN RUTE
 ------------------------------------------------------------------
 local btnAddE = makeButton(pageRoute, "📍 Titik E (Panen)", COLORS.green,
-    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfW, 0, 34))
+    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfR, 0, 32))
 local btnAddWalk = makeButton(pageRoute, "🚶 Titik Jalan", COLORS.blue,
-    UDim2.new(0, PAD * 2 + halfW, 0, 8), UDim2.new(0, halfW, 0, 34))
+    UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 32))
 
-local coordLabel = makeLabel(pageRoute, "Posisi: -", UDim2.new(0, PAD, 0, 46),
-    UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 12)
+local coordLabel = makeLabel(pageRoute, "Posisi: -", UDim2.new(0, PAD, 0, 44),
+    UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 11)
 
-local listFrame = makeList(pageRoute, 70, 110)
+local listFrame = makeList(pageRoute, 68, 110)
 
 local btnUndo = makeButton(pageRoute, "↶ Hapus Terakhir", COLORS.orange,
-    UDim2.new(0, PAD, 0, 186), UDim2.new(0, halfW, 0, 28))
+    UDim2.new(0, PAD, 0, 184), UDim2.new(0, halfR, 0, 28))
 local btnClear = makeButton(pageRoute, "🗑 Hapus Semua", COLORS.grey,
-    UDim2.new(0, PAD * 2 + halfW, 0, 186), UDim2.new(0, halfW, 0, 28))
+    UDim2.new(0, PAD + halfR + 6, 0, 184), UDim2.new(0, halfR, 0, 28))
 
-addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 222, "int")
-addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 250, "num")
-addSetting(pageRoute, "Delay setelah tekan E (detik)", "eDelay", 278, "num")
-addSetting(pageRoute, "Radius titik (stud)",           "radius", 306, "num")
-addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 334, "num")
+addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 220, "int")
+addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 248, "num")
+addSetting(pageRoute, "Delay setelah tekan E (detik)", "eDelay", 276, "num")
+addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
+addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
 ------------------------------------------------------------------
 local btnAuto = makeButton(pageChest, "📦 Auto Simpan: ON", COLORS.green,
-    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfW, 0, 32))
+    UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfR, 0, 30))
 local btnScan = makeButton(pageChest, "🔍 Scan Trunk", COLORS.blue,
-    UDim2.new(0, PAD * 2 + halfW, 0, 8), UDim2.new(0, halfW, 0, 32))
+    UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 30))
 
 local chestInfo = makeLabel(pageChest, "Peti: 0 | Penuh: 0 | Tersimpan: 0 item",
-    UDim2.new(0, PAD, 0, 44), UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 12)
+    UDim2.new(0, PAD, 0, 42), UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, COLORS.sub, 11)
 
-local chestList = makeList(pageChest, 66, 70)
+local chestList = makeList(pageChest, 64, 70)
 
 local btnCalib = makeButton(pageChest, "🎯 Kalibrasi Drag", COLORS.blue,
-    UDim2.new(0, PAD, 0, 142), UDim2.new(1, -PAD * 2, 0, 28))
+    UDim2.new(0, PAD, 0, 140), UDim2.new(1, -PAD - RPAD, 0, 28))
 
-local calibLabel = makeLabel(pageChest, "Kalibrasi: belum diatur", UDim2.new(0, PAD, 0, 172),
-    UDim2.new(1, -PAD * 2, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 12)
+local calibLabel = makeLabel(pageChest, "Kalibrasi: belum diatur", UDim2.new(0, PAD, 0, 170),
+    UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 11)
 
-addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 196, "text", 130, "trunk")
-addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 222, "int", 50)
-addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 248, "num")
-addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 274, "int")
-addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 300, "text", 100, "semua")
-addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 326, "text", 100, "contoh: sabit")
-addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 352, "num")
-addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 378, "num")
-addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 404, "int")
+addSetting(pageChest, "Nama peti (pisah koma)",       "chestKeywords", 196, "text", 110, "trunk")
+addSetting(pageChest, "Cocok persis (1=ya)",          "exactMatch", 224, "int", 50)
+addSetting(pageChest, "Radius scan peti (stud)",      "chestScanRadius", 252, "num")
+addSetting(pageChest, "Tas penuh jika item ≥",        "bagCapacity", 280, "int")
+addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 308, "text", 80, "semua")
+addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 336, "text", 80, "contoh: sabit")
+addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 364, "num")
+addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 392, "num")
+addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 420, "int")
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -415,7 +433,7 @@ local function updateStats()
     else
         timeStr = string.format("%02d:%02d", e // 60, e % 60)
     end
-    statsLabel.Text = string.format("🌱 Panen: %d   |   🔁 Loop: %d   |   ⏱ %s",
+    statsLabel.Text = string.format("🌱 Panen: %d  |  🔁 Loop: %d  |  ⏱ %s",
         stats.harvested, stats.loops, timeStr)
 end
 
@@ -465,7 +483,7 @@ local function refreshList()
         makeLabel(row,
             string.format("%d. %s  (%.0f, %.0f, %.0f)", i, tag, pt.pos.X, pt.pos.Y, pt.pos.Z),
             UDim2.new(0, 8, 0, 0), UDim2.new(1, -40, 1, 0), Enum.TextXAlignment.Left,
-            pt.type == "action" and Color3.fromRGB(120, 220, 150) or Color3.fromRGB(130, 180, 255), 12)
+            pt.type == "action" and Color3.fromRGB(120, 220, 150) or Color3.fromRGB(130, 180, 255), 11)
 
         local del = makeButton(row, "✕", COLORS.red,
             UDim2.new(1, -4, 0.5, 0), UDim2.new(0, 22, 0, 20), Vector2.new(1, 0.5))
@@ -623,7 +641,7 @@ local function refreshChestList()
 
         makeLabel(row, string.format("#%d  %s", chest.number, chest.inst.Name),
             UDim2.new(0, 8, 0, 0), UDim2.new(1, -86, 1, 0), Enum.TextXAlignment.Left,
-            chest.full and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(255, 215, 120), 12)
+            chest.full and Color3.fromRGB(255, 130, 130) or Color3.fromRGB(255, 215, 120), 11)
 
         local toggle = makeButton(row, chest.full and "PENUH" or "Kosong",
             chest.full and COLORS.red or COLORS.green,
