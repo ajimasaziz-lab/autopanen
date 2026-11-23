@@ -1,7 +1,7 @@
 --[[
     🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
-    - Titik [E]    : player berjalan (tombol WASD) ke titik, menekan E 1x, lanjut
-    - Titik [Jalan]: player hanya melewati titik
+    - Titik Panen : player berjalan (tombol WASD) ke titik, menekan tombol panen (F), lanjut
+    - Titik Jalan : player hanya melewati titik
     - Penghitung panen / loop / waktu (tetap tampil saat minimize)
     - Tas penuh -> jalan ke Trunk, tekan F (buka peti), seret item dari
       inventory ke area peti (kiri)
@@ -10,6 +10,7 @@
     - Tombol Reset Panen dan Reset Peti
     - Perlu KALIBRASI DRAG sekali (tab Peti)
     - Jalan memakai WASD, scan peti memakai bounding box
+    - Tombol panen bisa diganti di tab Rute (default F)
 ]]
 
 local Players      = game:GetService("Players")
@@ -50,10 +51,11 @@ local config = {
     -- rute
     maxLoops        = 0,
     loopDelay       = 2,
-    eDelay          = 1,
+    eDelay          = 1,       -- jeda setelah panen (detik)
     radius          = 3,
     stepTimeout     = 15,
     useWASD         = 1,       -- 1 = jalan pakai tombol WASD, 0 = pakai Humanoid:MoveTo
+    harvestKey      = "F",     -- tombol panen
     -- peti
     autoStore       = true,
     bagCapacity     = 20,      -- tas penuh jika jumlah item >= angka ini
@@ -70,7 +72,7 @@ local config = {
     closeChest      = 0,       -- 1 = tekan F lagi untuk menutup peti setelah selesai
 }
 
-local points   = {}
+local points   = {}   -- { pos = Vector3, type = "action" | "walk" }
 local chests   = {}   -- { inst, part, number, full, marker, label }
 local nextChestNo = 1
 local running  = false
@@ -157,7 +159,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 -- tinggi isi tiap halaman (yang di-scroll)
-local ROUTE_CANVAS = 404
+local ROUTE_CANVAS = 432
 local CHEST_CANVAS = 436
 
 local gui = new("ScreenGui", {
@@ -266,7 +268,7 @@ local statusLabel = makeLabel(footer, "Status: Siap", UDim2.new(0, PAD, 0, 36),
     UDim2.new(1, -PAD * 2, 0, 22), Enum.TextXAlignment.Left, COLORS.sub, 11)
 statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
 
--- margin kanan 6 ekstra agar tidak tertutup scrollbar
+-- margin kanan ekstra agar tidak tertutup scrollbar
 local RPAD = PAD + 6
 
 local function addSetting(parent, labelText, key, y, kind, boxW, placeholder)
@@ -326,7 +328,7 @@ local halfR = (WIN_W - PAD - RPAD - 6) / 2 -- lebar setengah untuk tombol di dal
 ------------------------------------------------------------------
 -- HALAMAN RUTE
 ------------------------------------------------------------------
-local btnAddE = makeButton(pageRoute, "📍 Titik E (Panen)", COLORS.green,
+local btnAddE = makeButton(pageRoute, "📍 Titik Panen (F)", COLORS.green,
     UDim2.new(0, PAD, 0, 8), UDim2.new(0, halfR, 0, 32))
 local btnAddWalk = makeButton(pageRoute, "🚶 Titik Jalan", COLORS.blue,
     UDim2.new(0, PAD + halfR + 6, 0, 8), UDim2.new(0, halfR, 0, 32))
@@ -343,10 +345,11 @@ local btnClear = makeButton(pageRoute, "🗑 Hapus Semua", COLORS.grey,
 
 addSetting(pageRoute, "Jumlah loop (0 = tanpa batas)", "maxLoops", 220, "int")
 addSetting(pageRoute, "Jeda antar loop (detik)",       "loopDelay", 248, "num")
-addSetting(pageRoute, "Delay setelah tekan E (detik)", "eDelay", 276, "num")
+addSetting(pageRoute, "Delay setelah panen (detik)",   "eDelay", 276, "num")
 addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
 addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
 addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
+addSetting(pageRoute, "Tombol panen",                  "harvestKey", 388, "text", 50, "F")
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -481,7 +484,7 @@ local function refreshList()
         corner(row, 6)
         rowRefs[i] = row
 
-        local tag = pt.type == "action" and "[E]" or "[Jalan]"
+        local tag = pt.type == "action" and "[Panen]" or "[Jalan]"
         makeLabel(row,
             string.format("%d. %s  (%.0f, %.0f, %.0f)", i, tag, pt.pos.X, pt.pos.Y, pt.pos.Z),
             UDim2.new(0, 8, 0, 0), UDim2.new(1, -40, 1, 0), Enum.TextXAlignment.Left,
@@ -503,7 +506,7 @@ local function addPoint(kind)
     if not root then setStatus("Karakter tidak ditemukan"); return end
     table.insert(points, { pos = root.Position, type = kind })
     refreshList()
-    setStatus(string.format("Titik %d (%s) ditambahkan", #points, kind == "action" and "E" or "Jalan"))
+    setStatus(string.format("Titik %d (%s) ditambahkan", #points, kind == "action" and "Panen" or "Jalan"))
 end
 
 btnAddE.MouseButton1Click:Connect(function() addPoint("action") end)
@@ -1003,13 +1006,16 @@ local function pressKey(keyCode, hold)
     end)
 end
 
-local function pressE() pressKey(KC.E, 0.05) end
-
-local function openKeyCode()
-    local k = tostring(config.openKey or "F"):upper()
-    local ok, kc = pcall(function() return KC[k] end)
-    return (ok and kc) or KC.F
+local function keyFromName(name, default)
+    local ok, kc = pcall(function() return KC[tostring(name or ""):upper()] end)
+    return (ok and kc) or default
 end
+
+-- tombol panen (default F)
+local function pressHarvest() pressKey(keyFromName(config.harvestKey, KC.F), 0.05) end
+
+-- tombol buka peti (default F)
+local function openKeyCode() return keyFromName(config.openKey, KC.F) end
 
 -- arahkan karakter ke target dengan menekan W/A/S/D relatif terhadap kamera
 local function steerTo(root, target)
@@ -1275,7 +1281,7 @@ local function startRun()
 
                 if alive(myId) and pt.type == "action" then
                     task.wait(0.2)
-                    pressE()
+                    pressHarvest()
                     stats.harvested += 1
                     updateStats()
                     setStatus(string.format("Loop %d | Panen ke-%d (titik %d)", loopCount + 1, stats.harvested, i))
