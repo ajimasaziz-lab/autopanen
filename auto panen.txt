@@ -9,12 +9,12 @@
     - Urutan rute BOLAK-BALIK: 1-2-3-4-5-6 lalu 5-4-3-2-1, lalu ulang (tanpa melompat ke titik 1)
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
-    - Kalibrasi Drag (tab Peti) sekarang 2 langkah:
-        1) klik slot item pertama, 2) klik area peti (tujuan drop),
-        3) (opsional) klik slot item ke-2, 4) klik POSISI tombol Confirm.
-      Setelah tiap seretan item, skrip mengklik posisi Confirm yang sudah dikalibrasi
-      (tidak mencari lewat teks lagi). Di langkah 4 skrip menyeret 1 item otomatis agar
-      pop up Confirm muncul; jika belum muncul tekan "Seret lagi" di banner.
+    - Auto simpan: buka peti (tunggu 3 detik) lalu ulangi siklus 4 titik kalibrasi:
+        titik 1 = tekan & tahan item, seret ke titik 2 (area peti, sisi kiri),
+        tunggu 1 detik sampai tombol konfirmasi muncul, klik titik 3 (Confirm),
+        lalu klik titik 4 (tombol Sort) agar item berikutnya naik ke slot pertama.
+      Di langkah 3 kalibrasi skrip menyeret 1 item otomatis agar Confirm muncul;
+      jika belum muncul tekan "Seret lagi" di banner.
     - Waktu simpan tiba -> HITUNG RUTE dulu (Pathfinding, 8 titik berdiri di sekeliling peti,
       pilih yang valid & terpendek), baru jalan ke peti. Jika tersangkut di tengah jalan, karakter
       kembali ke jalur panen dan mengikuti titik-titik rute sampai lepas,
@@ -67,7 +67,8 @@ local config = {
     harvestKey      = "F",     -- tombol panen (mode 1)
     harvestNotif    = "harvested", -- kata pada notifikasi panen yang dihitung (tidak peka huruf besar/kecil)
     chestFullNotif  = "chest full, trunk full, storage full",                    -- notifikasi peti penuh
-    confirmDelay    = 0.6,     -- jeda sebelum klik posisi Confirm hasil kalibrasi (detik)
+    confirmDelay    = 1,       -- tunggu setelah item diseret sebelum klik Confirm (detik)
+    sortDelay       = 0.6,     -- jeda setelah klik Confirm sebelum klik Sort (detik)
     dragTotal       = 20,      -- jumlah seretan per kunjungan jika isi tas tidak bisa dihitung
     countAmount     = 1,       -- 1 = tambah sesuai angka "xN" di notifikasi, 0 = hitung 1 per notifikasi
     radius          = 3,
@@ -81,15 +82,14 @@ local config = {
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
-    chestDist       = 2,
+    chestDist       = 4,
     usePathfind     = 1,       -- 1 = hitung rute dulu (Pathfinding) sebelum menuju peti
     stuckLimit      = 3,       -- detik tanpa gerak sebelum dianggap tersangkut (menuju peti)
     materialKeywords = "",
     keepKeywords    = "",
     depositDelay    = 0.6,
     openKey         = "F",
-    openDelay       = 1,
-    slotCount       = 1,
+    openDelay       = 3,       -- tunggu setelah menekan tombol buka peti (detik)
     closeChest      = 0,
 }
 
@@ -101,7 +101,7 @@ local runId    = 0
 local rowRefs  = {}
 local stats    = { harvested = 0, loops = 0, deposited = 0, elapsed = 0, runStart = nil }
 local depositCooldown = 0
-local calib    = { slot = nil, step = nil, drop = nil, confirm = nil }
+local calib    = { slot = nil, drop = nil, confirm = nil, sort = nil }
 local calibStep = 0
 local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
 local harvestPos = nil       -- Vector2 posisi tengah tombol bulat (koordinat layar)
@@ -193,7 +193,7 @@ local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
 local ROUTE_CANVAS = 644
-local CHEST_CANVAS = 668
+local CHEST_CANVAS = 688
 
 local gui = new("ScreenGui", {
     Name = "AutoPanenGUI",
@@ -234,7 +234,7 @@ local btnBannerCancel = makeButton(calibBanner, "✕ Batal", COLORS.red,
     UDim2.new(0, 8, 0, 38), UDim2.new(0.25, -8, 0, 20))
 local btnBannerRedo = makeButton(calibBanner, "↻ Seret lagi", COLORS.blue,
     UDim2.new(0.25, 4, 0, 38), UDim2.new(0.35, -6, 0, 20))
-local btnBannerSkip = makeButton(calibBanner, "⏭ Lewati slot ke-2", COLORS.orange,
+local btnBannerSkip = makeButton(calibBanner, "⏭ Lewati Confirm", COLORS.orange,
     UDim2.new(0.6, 2, 0, 38), UDim2.new(0.4, -10, 0, 20))
 for _, b in ipairs({ btnBannerCancel, btnBannerRedo, btnBannerSkip }) do
     b.TextSize = 11
@@ -473,13 +473,14 @@ addSetting(pageChest, "Simpan otomatis tiap (menit)", "storeInterval", 348, "num
 addSetting(pageChest, "Item material (kosong=semua)", "materialKeywords", 376, "text", 80, "semua")
 addSetting(pageChest, "Jangan disimpan (nama item)",  "keepKeywords", 404, "text", 80, "contoh: sabit")
 addSetting(pageChest, "Jarak berdiri dari peti",      "chestDist", 432, "num")
-addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 460, "num")
-addSetting(pageChest, "Jumlah slot dicoba",           "slotCount", 488, "int")
-addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 516, "num")
-addSetting(pageChest, "Notifikasi peti penuh (kata)", "chestFullNotif", 544, "text", 80, "chest full")
-addSetting(pageChest, "Jumlah seret (tanpa hitungan)", "dragTotal", 572, "int", 50)
-addSetting(pageChest, "Hitung rute dulu (1=ya)",      "usePathfind", 600, "int", 50)
-addSetting(pageChest, "Jeda klik Confirm (detik)",    "confirmDelay", 628, "num", 50)
+addSetting(pageChest, "Delay buka peti (detik)",      "openDelay", 460, "num", 50)
+addSetting(pageChest, "Batas tersangkut (detik)",     "stuckLimit", 488, "num")
+addSetting(pageChest, "Notifikasi peti penuh (kata)", "chestFullNotif", 516, "text", 80, "chest full")
+addSetting(pageChest, "Jumlah seret (tanpa hitungan)", "dragTotal", 544, "int", 50)
+addSetting(pageChest, "Hitung rute dulu (1=ya)",      "usePathfind", 572, "int", 50)
+addSetting(pageChest, "Tunggu Confirm muncul (detik)", "confirmDelay", 600, "num", 50)
+addSetting(pageChest, "Jeda Confirm -> Sort (detik)", "sortDelay", 628, "num", 50)
+addSetting(pageChest, "Jeda setelah Sort (detik)",    "depositDelay", 656, "num", 50)
 
 ------------------------------------------------------------------
 -- DRAG WINDOW
@@ -970,17 +971,17 @@ btnAuto.MouseButton1Click:Connect(function()
 end)
 
 ------------------------------------------------------------------
--- KALIBRASI DRAG (4 langkah: slot, area peti, slot ke-2 [opsional], posisi Confirm)
+-- KALIBRASI DRAG (4 titik: item, area peti, Confirm, Sort)
 ------------------------------------------------------------------
 local function updateCalibLabel()
     calibBanner.Visible = calibStep > 0
     btnBannerSkip.Visible = (calibStep == 3 or calibStep == 4)
-    btnBannerRedo.Visible = (calibStep == 4)
-    btnBannerSkip.Text = (calibStep == 4) and "⏭ Lewati Confirm" or "⏭ Lewati slot ke-2"
+    btnBannerRedo.Visible = (calibStep == 3)
+    btnBannerSkip.Text = (calibStep == 4) and "⏭ Lewati Sort" or "⏭ Lewati Confirm"
     if calib.slot and calib.drop then
         calibLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
-        calibLabel.Text = string.format("Kalibrasi OK | slot2: %s | confirm: %s",
-            calib.step and "ya" or "tidak", calib.confirm and "ya" or "tidak")
+        calibLabel.Text = string.format("Kalibrasi OK | confirm: %s | sort: %s",
+            calib.confirm and "ya" or "tidak", calib.sort and "ya" or "tidak")
     else
         calibLabel.TextColor3 = Color3.fromRGB(255, 170, 120)
         calibLabel.Text = "Kalibrasi: belum diatur"
@@ -1013,46 +1014,53 @@ local function finishCalib(msg)
     setStatus(msg)
 end
 
--- langkah 4: skrip menyeret 1 item sendiri agar pop up Confirm muncul, lalu pengguna
--- mengklik tombol Confirm di layar (POSISI klik disimpan)
+-- langkah 3: skrip menyeret 1 item sendiri (titik 1 -> titik 2) agar tombol Confirm muncul,
+-- lalu pengguna mengklik tombol Confirm di layar (posisi klik disimpan)
 local function triggerConfirmPopup()
     if not calibTriggerDrag then
-        setStatus("4/4 Seret 1 item sendiri, lalu klik tombol CONFIRM di layar")
+        setStatus("3/4 Seret 1 item sendiri, lalu klik tombol CONFIRM di layar")
         return
     end
     if calibIgnore then return end
-    setStatus("4/4 Menyeret 1 item agar pop up Confirm muncul...")
+    setStatus("3/4 Menyeret 1 item agar tombol Confirm muncul...")
     calibIgnore = true
     task.spawn(function()
         calibTriggerDrag()
         task.wait(1)
         calibIgnore = false
-        if calibStep == 4 then
-            setStatus("4/4 Klik tombol CONFIRM di layar. Pop up tidak muncul? Tekan ↻ Seret lagi")
+        if calibStep == 3 then
+            setStatus("3/4 Klik tombol CONFIRM di layar. Tidak muncul? Tekan ↻ Seret lagi")
         end
     end)
 end
 
-local function enterStep4()
-    calibStep = 4
+local function enterStep3()
+    calibStep = 3
     btnCalib.Text = "⏭ Lewati Confirm"
     updateCalibLabel()
     triggerConfirmPopup()
+end
+
+local function enterStep4()
+    calibStep = 4
+    btnCalib.Text = "⏭ Lewati Sort"
+    updateCalibLabel()
+    setStatus("4/4 Klik tombol SORT di layar (atau tekan Lewati)")
 end
 
 btnBannerCancel.MouseButton1Click:Connect(function()
     if calibStep > 0 then finishCalib("Kalibrasi dibatalkan") end
 end)
 btnBannerRedo.MouseButton1Click:Connect(function()
-    if calibStep == 4 then triggerConfirmPopup() end
+    if calibStep == 3 then triggerConfirmPopup() end
 end)
 btnBannerSkip.MouseButton1Click:Connect(function()
     if calibStep == 3 then
-        calib.step = nil
+        calib.confirm = nil
         enterStep4()
     elseif calibStep == 4 then
-        calib.confirm = nil
-        finishCalib("Kalibrasi selesai (tanpa posisi Confirm)")
+        calib.sort = nil
+        finishCalib("Kalibrasi selesai (tanpa posisi Sort)")
     end
 end)
 
@@ -1060,24 +1068,24 @@ btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
     if calibStep > 0 then
         if calibStep == 3 then
-            calib.step = nil
+            calib.confirm = nil
             enterStep4()
         elseif calibStep == 4 then
-            calib.confirm = nil
-            finishCalib("Kalibrasi selesai (tanpa posisi Confirm)")
+            calib.sort = nil
+            finishCalib("Kalibrasi selesai (tanpa posisi Sort)")
         else
             finishCalib("Kalibrasi dibatalkan")
         end
         return
     end
-    calib = { slot = nil, step = nil, drop = nil, confirm = nil }
+    calib = { slot = nil, drop = nil, confirm = nil, sort = nil }
     calibStep = 1
     btnCalib.Text = "⏹ Batalkan kalibrasi"
     calibWasMin = minimized
     if setMinimized then setMinimized(true) end -- minimize otomatis, perintah tampil di banner
     btnCalib.BackgroundColor3 = COLORS.orange
     updateCalibLabel()
-    setStatus("1/4 Buka peti (F), klik SLOT ITEM pertama di inventory")
+    setStatus("1/4 Buka peti (F), klik ITEM yang mau dipindah (titik awal seret)")
 end)
 
 UIS.InputBegan:Connect(function(input)
@@ -1091,18 +1099,16 @@ UIS.InputBegan:Connect(function(input)
     if calibStep == 1 then
         calib.slot = pos
         calibStep = 2
-        setStatus("2/4 Klik AREA PETI (tujuan drop, sisi kiri)")
+        setStatus("2/4 Klik AREA PETI sisi kiri (tujuan seret)")
     elseif calibStep == 2 then
         calib.drop = pos
-        calibStep = 3
-        setStatus("3/4 (opsional) klik SLOT ITEM ke-2, atau tekan tombol Lewati")
-        btnCalib.Text = "⏭ Lewati slot ke-2"
+        enterStep3()
     elseif calibStep == 3 then
-        calib.step = pos - calib.slot
+        calib.confirm = pos
         enterStep4()
     elseif calibStep == 4 then
-        calib.confirm = pos
-        finishCalib("Kalibrasi selesai (posisi Confirm tersimpan)")
+        calib.sort = pos
+        finishCalib("Kalibrasi selesai (4 titik tersimpan)")
         return
     end
     updateCalibLabel()
@@ -1673,7 +1679,7 @@ local function smartTravel(goals, finalTarget, myId, radius, fromIdx)
 end
 
 ------------------------------------------------------------------
--- KLIK POSISI "Confirm" (hasil kalibrasi langkah 4)
+-- SIMPAN KE PETI
 ------------------------------------------------------------------
 -- klik satu titik; panel/tombol bulat script disembunyikan sesaat jika menutupi titik itu
 local function clickGuarded(pos)
@@ -1690,31 +1696,34 @@ local function clickGuarded(pos)
     if hideMarker then markerFrame.Visible = markerShown end
 end
 
--- klik Confirm setelah item digeser: tunggu pop up muncul lalu klik posisi hasil kalibrasi.
--- return true jika diklik (false jika posisi Confirm belum dikalibrasi)
-local function clickConfirm(myId)
-    if not calib.confirm then return false end
-    setStatus("Klik Confirm...")
-    waitInterruptible(config.confirmDelay, myId)
-    if not alive(myId) then return false end
-    clickGuarded(calib.confirm)
-    return true
-end
-
-------------------------------------------------------------------
--- SIMPAN KE PETI
-------------------------------------------------------------------
 local function pickChest(skip)
     for _, c in ipairs(chests) do
         if not c.full and chestValid(c) and not skip[c] then return c end
     end
 end
 
-local function slotPos(idx)
-    if calib.step and idx > 1 then
-        return calib.slot + calib.step * (idx - 1)
+-- satu siklus pemindahan item:
+-- titik 1 (tekan & tahan) -> seret ke titik 2 -> tunggu -> klik titik 3 (Confirm) -> klik titik 4 (Sort)
+local function transferOnce(myId, label)
+    setStatus(label .. " | seret item")
+    dragMouse(calib.slot, calib.drop)
+    if not alive(myId) then return end
+
+    waitInterruptible(config.confirmDelay, myId) -- tunggu tombol Confirm muncul
+    if not alive(myId) then return end
+    if calib.confirm then
+        setStatus(label .. " | klik Confirm")
+        clickGuarded(calib.confirm)
     end
-    return calib.slot
+
+    waitInterruptible(config.sortDelay, myId)
+    if not alive(myId) then return end
+    if calib.sort then
+        setStatus(label .. " | klik Sort")
+        clickGuarded(calib.sort)
+    end
+
+    waitInterruptible(config.depositDelay, myId)
 end
 
 -- Return: "ok", "allfull", "unreachable", "nochest", "nocalib", "stopped"
@@ -1759,21 +1768,19 @@ local function depositAll(myId)
             continue
         end
 
-        setStatus(string.format("Membuka peti #%d (%s)", chest.number, config.openKey))
+        -- 1) buka peti dulu, tunggu (default 3 detik)
+        setStatus(string.format("Membuka peti #%d (%s), tunggu %ss", chest.number, config.openKey, tostring(config.openDelay)))
         pressKey(openKeyCode(), 0.1)
         waitInterruptible(config.openDelay, myId)
+        if not alive(myId) then break end
 
         if not countable then
-            -- mode buta: seret item sebanyak dragTotal kali, berhenti jika notifikasi peti penuh muncul
+            -- mode buta: ulangi siklus sebanyak dragTotal kali, berhenti jika notifikasi peti penuh muncul
             local total = math.max(1, config.dragTotal)
             chestFullFlag = false
             for k = 1, total do
                 if not alive(myId) then break end
-                local sidx = (calib.step and config.slotCount > 1) and ((k - 1) % config.slotCount + 1) or 1
-                setStatus(string.format("Pindah item ke peti #%d (%d/%d)", chest.number, k, total))
-                dragMouse(slotPos(sidx), calib.drop)
-                clickConfirm(myId)
-                waitInterruptible(config.depositDelay, myId)
+                transferOnce(myId, string.format("Peti #%d (%d/%d)", chest.number, k, total))
                 deposited += 1
                 if chestFullFlag then
                     chest.full = true
@@ -1792,15 +1799,12 @@ local function depositAll(myId)
             break
         end
 
-        local idx, fails = 1, 0
+        local fails = 0
         while alive(myId) and not chest.full do
             local before = countMaterials(skipTool)
             if before <= 0 then break end
 
-            setStatus(string.format("Pindah item ke peti #%d (slot %d)", chest.number, idx))
-            dragMouse(slotPos(idx), calib.drop)
-            clickConfirm(myId)
-            waitInterruptible(config.depositDelay, myId)
+            transferOnce(myId, string.format("Peti #%d", chest.number))
             local after = countMaterials(skipTool)
 
             if after < before then
@@ -1812,16 +1816,11 @@ local function depositAll(myId)
             else
                 fails += 1
                 if fails >= 2 then
-                    if calib.step and idx < config.slotCount then
-                        idx += 1
-                        fails = 0
-                    else
-                        chest.full = true
-                        updateMarker(chest)
-                        updateChestInfo()
-                        refreshChestList()
-                        setStatus(string.format("Peti #%d penuh, pindah peti berikutnya", chest.number))
-                    end
+                    chest.full = true
+                    updateMarker(chest)
+                    updateChestInfo()
+                    refreshChestList()
+                    setStatus(string.format("Peti #%d penuh, pindah peti berikutnya", chest.number))
                 end
             end
         end
