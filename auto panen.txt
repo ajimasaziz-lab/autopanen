@@ -82,14 +82,14 @@ local config = {
     chestKeywords   = "trunk, chest",  -- pisah koma; "chest" ikut mencakup "Mimic Chest"
     exactMatch      = 0,
     chestScanRadius = 50,
-    chestDist       = 4,
+    chestDist       = 2,
     usePathfind     = 1,       -- 1 = hitung rute dulu (Pathfinding) sebelum menuju peti
     stuckLimit      = 3,       -- detik tanpa gerak sebelum dianggap tersangkut (menuju peti)
     materialKeywords = "",
     keepKeywords    = "",
-    depositDelay    = 0.6,
+    depositDelay    = 0.3,
     openKey         = "F",
-    openDelay       = 3,       -- tunggu setelah menekan tombol buka peti (detik)
+    openDelay       = 2,       -- tunggu setelah menekan tombol buka peti (detik)
     closeChest      = 0,
 }
 
