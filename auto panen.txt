@@ -49,7 +49,10 @@ local config = {
     -- rute
     maxLoops        = 0,
     loopDelay       = 2,
-    eDelay          = 1,
+    preHarvestDelay = 1,       -- tunggu setelah tiba di titik, sebelum panen (detik)
+    eDelay          = 0.5,     -- jeda setelah panen selesai, sebelum ke titik berikutnya (detik)
+    harvestMode     = 1,       -- 1 = tekan tombol F, 2 = klik tombol keranjang di layar
+    harvestKey      = "F",     -- tombol panen (mode 1)
     radius          = 3,
     stepTimeout     = 15,
     useWASD         = 1,
@@ -161,7 +164,7 @@ local EXP_H   = TITLE_H + STRIP_H + CONTENT_H
 local PAD     = 10
 local halfW   = (WIN_W - PAD * 3) / 2
 
-local ROUTE_CANVAS = 508
+local ROUTE_CANVAS = 592
 local CHEST_CANVAS = 516
 
 local gui = new("ScreenGui", {
@@ -356,6 +359,9 @@ local harvestLabel = makeLabel(pageRoute, "Tombol keranjang: belum diatur", UDim
     UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 11)
 addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 444, "int", 50)
 addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 472, "num", 50)
+addSetting(pageRoute, "Tunggu sebelum panen (detik)",  "preHarvestDelay", 500, "num", 50)
+addSetting(pageRoute, "Cara panen (1=F, 2=keranjang)", "harvestMode", 528, "int", 50)
+addSetting(pageRoute, "Tombol panen (mode 1)",         "harvestKey", 556, "text", 50, "F")
 
 ------------------------------------------------------------------
 -- HALAMAN PETI
@@ -1115,13 +1121,17 @@ local function clickAt(pos)
     end)
 end
 
--- panen = klik tombol keranjang buah di layar
+-- panen: mode 1 = tekan tombol F, mode 2 = klik tombol keranjang di layar
 local function pressHarvest()
-    if harvestBtnPos then
-        clickAt(harvestBtnPos)
-        return true
+    if config.harvestMode == 2 then
+        if harvestBtnPos then
+            clickAt(harvestBtnPos)
+            return true
+        end
+        return false
     end
-    return false
+    pressKey(keyFromName(config.harvestKey, KC.F), 0.1)
+    return true
 end
 local function openKeyCode() return keyFromName(config.openKey, KC.F) end
 
@@ -1502,7 +1512,7 @@ local function startRun()
     for _, p in ipairs(points) do
         if p.type == "action" then hasAction = true break end
     end
-    if hasAction and not harvestBtnPos then
+    if hasAction and config.harvestMode == 2 and not harvestBtnPos then
         setStatus("Atur Tombol Keranjang dulu (tab Rute)")
         return
     end
@@ -1551,7 +1561,9 @@ local function startRun()
                 if r == "reached" then
                     routeIdx = i
                     if pt.type == "action" then
-                        task.wait(0.2)
+                        setStatus(string.format("Tiba di titik %d, tunggu %ss lalu panen", i, tostring(config.preHarvestDelay)))
+                        waitInterruptible(config.preHarvestDelay, myId)
+                        if not alive(myId) then break end
                         pressHarvest()
                         stats.harvested += 1
                         updateStats()
