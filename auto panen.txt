@@ -1,7 +1,8 @@
 --[[
     🌾 AUTO PANEN + AUTO SIMPAN KE PETI (Trunk) - versi drag & drop
-    - Titik Panen : player berjalan (WASD) ke titik, lalu MENGKLIK tombol keranjang buah
-                    di layar (posisi diatur lewat "Atur Tombol Keranjang", tab Rute), lanjut
+    - Titik Panen : player berjalan (WASD) ke titik, tunggu 1 detik, lalu panen
+                    (mode 2 = klik lewat TOMBOL BULAT melayang yang digeser ke tombol
+                    panen di layar, lalu dikunci; mode 1 = tekan tombol F), lanjut
     - Titik Jalan : player hanya melewati titik
     - Saat PANEN: karakter hanya bergerak di GARIS RUTE antar titik (tidak melenceng).
       Jika tersangkut, mundur ke titik sebelumnya lalu coba lagi di jalur yang sama.
@@ -51,7 +52,7 @@ local config = {
     loopDelay       = 2,
     preHarvestDelay = 1,       -- tunggu setelah tiba di titik, sebelum panen (detik)
     eDelay          = 0.5,     -- jeda setelah panen selesai, sebelum ke titik berikutnya (detik)
-    harvestMode     = 1,       -- 1 = tekan tombol F, 2 = klik tombol keranjang di layar
+    harvestMode     = 2,       -- 1 = tekan tombol F, 2 = klik lewat tombol bulat melayang
     harvestKey      = "F",     -- tombol panen (mode 1)
     radius          = 3,
     stepTimeout     = 15,
@@ -86,8 +87,10 @@ local depositCooldown = 0
 local calib    = { slot = nil, step = nil, drop = nil }
 local calibStep = 0
 local routeIdx = nil   -- indeks titik rute terakhir yang berhasil dicapai
-local harvestBtnPos = nil     -- Vector2 posisi layar tombol keranjang buah
-local harvestCalibOn = false  -- sedang menunggu klik untuk kalibrasi tombol keranjang
+local harvestPos = nil       -- Vector2 posisi tengah tombol bulat (koordinat layar)
+local markerFrame = nil      -- tombol bulat melayang
+local markerLocked = false   -- true = posisi tombol bulat dikunci
+local markerShown = true     -- false = tombol bulat disembunyikan (posisi tetap dipakai)
 
 ------------------------------------------------------------------
 -- HELPER UI
@@ -353,14 +356,19 @@ addSetting(pageRoute, "Delay setelah panen (detik)",   "eDelay", 276, "num")
 addSetting(pageRoute, "Radius titik (stud)",           "radius", 304, "num")
 addSetting(pageRoute, "Timeout per titik (detik)",     "stepTimeout", 332, "num")
 addSetting(pageRoute, "Jalan pakai WASD (1=ya)",       "useWASD", 360, "int", 50)
-local btnHarvestCalib = makeButton(pageRoute, "🧺 Atur Tombol Keranjang", COLORS.blue,
-    UDim2.new(0, PAD, 0, 388), UDim2.new(1, -PAD - RPAD, 0, 28))
-local harvestLabel = makeLabel(pageRoute, "Tombol keranjang: belum diatur", UDim2.new(0, PAD, 0, 418),
-    UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 170, 120), 11)
+local btnMarkerShow = makeButton(pageRoute, "👁 Tombol: Tampil", COLORS.green,
+    UDim2.new(0, PAD, 0, 388), UDim2.new(0, halfR, 0, 28))
+local btnMarkerLock = makeButton(pageRoute, "🔓 Posisi: Terbuka", COLORS.blue,
+    UDim2.new(0, PAD + halfR + 6, 0, 388), UDim2.new(0, halfR, 0, 28))
+btnMarkerShow.TextSize = 11
+btnMarkerLock.TextSize = 11
+local markerLabel = makeLabel(pageRoute, "Seret tombol bulat ke tombol panen, lalu kunci", UDim2.new(0, PAD, 0, 418),
+    UDim2.new(1, -PAD - RPAD, 0, 20), Enum.TextXAlignment.Left, Color3.fromRGB(255, 200, 120), 11)
+markerLabel.TextTruncate = Enum.TextTruncate.AtEnd
 addSetting(pageRoute, "Coba ulang per titik (kali)",   "retryPerPoint", 444, "int", 50)
 addSetting(pageRoute, "Look-ahead jalur (stud)",       "lookahead", 472, "num", 50)
 addSetting(pageRoute, "Tunggu sebelum panen (detik)",  "preHarvestDelay", 500, "num", 50)
-addSetting(pageRoute, "Cara panen (1=F, 2=keranjang)", "harvestMode", 528, "int", 50)
+addSetting(pageRoute, "Cara panen (1=F, 2=bulat)", "harvestMode", 528, "int", 50)
 addSetting(pageRoute, "Tombol panen (mode 1)",         "harvestKey", 556, "text", 50, "F")
 
 ------------------------------------------------------------------
@@ -918,7 +926,6 @@ end
 
 btnCalib.MouseButton1Click:Connect(function()
     if running then setStatus("Stop dulu sebelum kalibrasi"); return end
-    if harvestCalibOn then setStatus("Selesaikan pengaturan tombol keranjang dulu"); return end
     if calibStep > 0 then
         if calibStep == 3 then
             calib.step = nil
@@ -961,52 +968,97 @@ UIS.InputBegan:Connect(function(input)
 end)
 
 ------------------------------------------------------------------
--- KALIBRASI TOMBOL KERANJANG (posisi tombol panen di layar)
+-- TOMBOL BULAT MELAYANG (arahkan ke tombol panen di layar)
 ------------------------------------------------------------------
-local function updateHarvestLabel()
-    if harvestBtnPos then
-        harvestLabel.TextColor3 = Color3.fromRGB(150, 230, 170)
-        harvestLabel.Text = string.format("Tombol keranjang OK (%.0f, %.0f)", harvestBtnPos.X, harvestBtnPos.Y)
+local MARKER_SIZE = 40
+
+do
+    local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600)
+    markerFrame = new("TextButton", {
+        Name = "HarvestMarker",
+        Text = "🧺",
+        TextSize = 20,
+        Font = Enum.Font.GothamBold,
+        TextColor3 = COLORS.text,
+        AutoButtonColor = false,
+        AnchorPoint = Vector2.new(0.5, 0.5),
+        Size = UDim2.new(0, MARKER_SIZE, 0, MARKER_SIZE),
+        Position = UDim2.fromOffset(math.floor(vp.X * 0.85), math.floor(vp.Y * 0.5)),
+        BackgroundColor3 = COLORS.green,
+        BackgroundTransparency = 0.25,
+        BorderSizePixel = 0,
+        ZIndex = 10,
+    }, gui)
+    corner(markerFrame, MARKER_SIZE / 2)
+    new("UIStroke", { Name = "Ring", Color = Color3.fromRGB(255, 255, 255), Thickness = 2 }, markerFrame)
+end
+
+local function syncHarvestPos()
+    harvestPos = Vector2.new(markerFrame.Position.X.Offset, markerFrame.Position.Y.Offset)
+end
+syncHarvestPos()
+
+local function updateMarkerUI()
+    markerFrame.Visible = markerShown
+    markerFrame.Active = not markerLocked -- terkunci: sentuhan menembus ke game
+    markerFrame.BackgroundColor3 = markerLocked and COLORS.red or COLORS.green
+    btnMarkerShow.Text = markerShown and "👁 Tombol: Tampil" or "🚫 Tombol: Sembunyi"
+    btnMarkerShow.BackgroundColor3 = markerShown and COLORS.green or COLORS.grey
+    btnMarkerLock.Text = markerLocked and "🔒 Posisi: Terkunci" or "🔓 Posisi: Terbuka"
+    btnMarkerLock.BackgroundColor3 = markerLocked and COLORS.red or COLORS.blue
+    if markerLocked then
+        markerLabel.Text = "Posisi terkunci (tombol bulat merah)"
+    elseif not markerShown then
+        markerLabel.Text = "Tombol disembunyikan, tampilkan untuk menggeser"
     else
-        harvestLabel.TextColor3 = Color3.fromRGB(255, 170, 120)
-        harvestLabel.Text = "Tombol keranjang: belum diatur"
+        markerLabel.Text = "Seret tombol bulat ke tombol panen, lalu kunci"
     end
 end
 
-local function finishHarvestCalib(msg)
-    harvestCalibOn = false
-    btnHarvestCalib.Text = "🧺 Atur Tombol Keranjang"
-    btnHarvestCalib.BackgroundColor3 = COLORS.blue
-    updateHarvestLabel()
-    setStatus(msg)
+btnMarkerShow.MouseButton1Click:Connect(function()
+    markerShown = not markerShown
+    updateMarkerUI()
+    setStatus(markerShown and "Tombol bulat ditampilkan" or "Tombol bulat disembunyikan (posisi tetap dipakai)")
+end)
+
+btnMarkerLock.MouseButton1Click:Connect(function()
+    markerLocked = not markerLocked
+    updateMarkerUI()
+    setStatus(markerLocked and "Posisi tombol bulat dikunci" or "Posisi tombol bulat dibuka, bisa digeser")
+end)
+
+do
+    local dragging, dragStart, startPos
+    markerFrame.InputBegan:Connect(function(input)
+        if markerLocked then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = markerFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    syncHarvestPos()
+                end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and not markerLocked and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - dragStart
+            local cam = workspace.CurrentCamera
+            local vp = cam and cam.ViewportSize or Vector2.new(4000, 4000)
+            local x = math.clamp(startPos.X.Offset + d.X, 0, vp.X)
+            local y = math.clamp(startPos.Y.Offset + d.Y, 0, vp.Y)
+            markerFrame.Position = UDim2.fromOffset(x, y)
+            syncHarvestPos()
+        end
+    end)
 end
 
-btnHarvestCalib.MouseButton1Click:Connect(function()
-    if running then setStatus("Stop dulu sebelum atur tombol keranjang"); return end
-    if calibStep > 0 then setStatus("Selesaikan kalibrasi drag dulu"); return end
-    if harvestCalibOn then
-        finishHarvestCalib("Pengaturan tombol keranjang dibatalkan")
-        return
-    end
-    harvestCalibOn = true
-    btnHarvestCalib.Text = "⏹ Batalkan"
-    btnHarvestCalib.BackgroundColor3 = COLORS.orange
-    setStatus("Klik tombol KERANJANG BUAH di layar (di luar panel ini)")
-end)
-
-UIS.InputBegan:Connect(function(input)
-    if not harvestCalibOn then return end
-    if input.UserInputType ~= Enum.UserInputType.MouseButton1
-        and input.UserInputType ~= Enum.UserInputType.Touch then return end
-
-    local pos = inputPos(input)
-    if insideMain(pos) then return end -- klik di panel script diabaikan
-
-    harvestBtnPos = pos
-    finishHarvestCalib("Tombol keranjang tersimpan. Jangan taruh panel di atasnya")
-end)
-
-updateHarvestLabel()
+updateMarkerUI()
 
 ------------------------------------------------------------------
 -- INVENTORY
@@ -1110,25 +1162,47 @@ local function keyFromName(name, default)
     return (ok and kc) or default
 end
 
--- klik satu titik di layar (dipakai untuk tombol keranjang buah)
+-- klik satu titik di layar (mouse virtual; di perangkat sentuh dicoba sentuhan virtual dulu)
 local function clickAt(pos)
-    pcall(function()
-        VIM:SendMouseMoveEvent(pos.X, pos.Y, game)
-        task.wait(0.05)
-        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
-        task.wait(0.07)
-        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
+    local ok = false
+    if UIS.TouchEnabled and not UIS.MouseEnabled then
+        ok = pcall(function()
+            VIM:SendTouchEvent(88, 0, pos.X, pos.Y)
+            task.wait(0.08)
+            VIM:SendTouchEvent(88, 2, pos.X, pos.Y)
+        end)
+    end
+    if not ok then
+        pcall(function()
+            VIM:SendMouseMoveEvent(pos.X, pos.Y, game)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+            task.wait(0.07)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+    end
 end
 
--- panen: mode 1 = tekan tombol F, mode 2 = klik tombol keranjang di layar
+-- klik di posisi tombol bulat; tombol bulat (dan panel jika menutupi) disembunyikan
+-- sesaat agar klik jatuh ke tombol panen di game, bukan ke GUI script
+local function clickMarker()
+    if not harvestPos then return false end
+    local mainWasVisible = main.Visible
+    local hideMain = insideMain(harvestPos)
+    markerFrame.Visible = false
+    if hideMain then main.Visible = false end
+    task.wait(0.05)
+    clickAt(harvestPos)
+    task.wait(0.05)
+    if hideMain then main.Visible = mainWasVisible end
+    markerFrame.Visible = markerShown
+    return true
+end
+
+-- panen: mode 1 = tekan tombol F, mode 2 = klik lewat tombol bulat
 local function pressHarvest()
     if config.harvestMode == 2 then
-        if harvestBtnPos then
-            clickAt(harvestBtnPos)
-            return true
-        end
-        return false
+        return clickMarker()
     end
     pressKey(keyFromName(config.harvestKey, KC.F), 0.1)
     return true
@@ -1505,17 +1579,7 @@ end
 local function startRun()
     if running then return end
     if calibStep > 0 then setStatus("Selesaikan kalibrasi dulu"); return end
-    if harvestCalibOn then setStatus("Selesaikan pengaturan tombol keranjang dulu"); return end
     if #points == 0 then setStatus("Tambahkan titik dulu!"); return end
-
-    local hasAction = false
-    for _, p in ipairs(points) do
-        if p.type == "action" then hasAction = true break end
-    end
-    if hasAction and config.harvestMode == 2 and not harvestBtnPos then
-        setStatus("Atur Tombol Keranjang dulu (tab Rute)")
-        return
-    end
 
     running = true
     runId += 1
@@ -1621,10 +1685,9 @@ btnClose.MouseButton1Click:Connect(function()
     running = false
     runId += 1
     calibStep = 0
-    harvestCalibOn = false
     releaseMoveKeys()
     for _, c in ipairs(chests) do removeMarker(c) end
     gui:Destroy()
 end)
 
-setStatus("Siap. Tambah titik, atur tombol keranjang, scan peti, kalibrasi drag, lalu Start")
+setStatus("Siap. Tambah titik, arahkan tombol bulat ke tombol panen & kunci, scan peti, kalibrasi drag, lalu Start")
